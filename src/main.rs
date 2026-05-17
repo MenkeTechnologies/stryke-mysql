@@ -1,0 +1,852 @@
+//! `stryke-mysql-helper` — bridge binary for the stryke `mysql` package.
+//!
+//! Two execution modes:
+//!
+//! * **Single-shot**: every invocation opens a fresh MySQL connection,
+//!   runs one command, prints JSON, exits. Trivial to script around;
+//!   eats a TCP handshake per call.
+//! * **Serve**: long-running JSON-RPC daemon on a Unix socket. Connection
+//!   pool is held inside the helper; stryke side sends requests over the
+//!   socket and reuses the warm connection. ~50× faster for hot loops.
+//!
+//! Output protocol:
+//!   query        → NDJSON rows on stdout (or one columnar JSON object
+//!                  with --columnar)
+//!   execute      → {"affected_rows":N,"last_insert_id":N}
+//!   exec --file  → array of per-statement {"affected_rows":...}
+//!   schema       → {"table":..,"columns":[...],"indexes":[...]}
+//!   tables       → NDJSON {"name":..}
+//!   databases    → NDJSON {"name":..}
+//!   stats        → JSON object
+//!   ping         → "ok"  (exit 0 / non-zero)
+//!
+//! DSN: standard `mysql://user:pass@host:port/db?ssl-mode=required` URL,
+//! or any subset of --host/--port/--user/--password/--database/--socket.
+//! Env vars: $MYSQL_DSN, $MYSQL_HOST, $MYSQL_PORT, $MYSQL_USER,
+//! $MYSQL_PASSWORD, $MYSQL_DATABASE.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use clap::{Parser, Subcommand};
+use mysql::prelude::*;
+use mysql::{
+    Conn, Opts, OptsBuilder, Params, Row, SslOpts, Value as MyValue,
+};
+use serde_json::{json, Map as JMap, Value};
+
+/* ------------------------------------------------------------------------- */
+/* CLI                                                                       */
+/* ------------------------------------------------------------------------- */
+
+#[derive(Parser)]
+#[command(
+    name = "stryke-mysql-helper",
+    version,
+    about = "MySQL / MariaDB bridge for the stryke `mysql` package"
+)]
+struct Cli {
+    /// DSN URL: `mysql://user:pass@host:port/db?ssl-mode=required`.
+    #[arg(long, env = "MYSQL_DSN", global = true)]
+    dsn: Option<String>,
+
+    #[arg(long, short = 'H', env = "MYSQL_HOST", global = true)]
+    host: Option<String>,
+
+    #[arg(long, short = 'P', env = "MYSQL_PORT", global = true)]
+    port: Option<u16>,
+
+    #[arg(long, short = 'u', env = "MYSQL_USER", global = true)]
+    user: Option<String>,
+
+    /// Prefer setting `$MYSQL_PASSWORD` rather than passing on the CLI.
+    #[arg(
+        long,
+        short = 'p',
+        env = "MYSQL_PASSWORD",
+        global = true,
+        hide_env_values = true
+    )]
+    password: Option<String>,
+
+    #[arg(long, short = 'D', env = "MYSQL_DATABASE", global = true)]
+    database: Option<String>,
+
+    /// Connect via a Unix socket instead of TCP.
+    #[arg(long, global = true)]
+    socket: Option<PathBuf>,
+
+    /// Enable SSL (`ssl-mode=required` analogue).
+    #[arg(long, global = true)]
+    ssl: bool,
+
+    /// Path to a CA bundle for SSL verification (implies --ssl).
+    #[arg(long, global = true)]
+    ssl_ca: Option<PathBuf>,
+
+    /// Connect timeout, seconds.
+    #[arg(long, global = true, default_value_t = 10)]
+    connect_timeout: u64,
+
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run a SELECT and stream rows as NDJSON.
+    Query {
+        sql: String,
+        /// JSON array (positional `?`) or object (named `:name`) of bind values.
+        #[arg(long)]
+        bind: Option<String>,
+        /// Emit one columnar JSON object instead of NDJSON.
+        #[arg(long)]
+        columnar: bool,
+        /// Prepend a `{"meta":{columns:[...]}}` line before rows.
+        #[arg(long)]
+        with_meta: bool,
+        /// Cap rows emitted (server-side LIMIT is preferred when possible).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Run a single non-SELECT statement.
+    Execute {
+        sql: String,
+        #[arg(long)]
+        bind: Option<String>,
+    },
+    /// Run a multi-statement SQL file (`;`-separated). Returns one JSON object
+    /// per statement.
+    Exec {
+        #[arg(long, short = 'f')]
+        file: PathBuf,
+    },
+    /// `SELECT * FROM TABLE [WHERE w] [ORDER BY o] [LIMIT n]` shorthand.
+    Dump {
+        #[arg(long, short = 't')]
+        table: String,
+        #[arg(long)]
+        columns: Option<String>,
+        #[arg(long = "where", short = 'w')]
+        where_clause: Option<String>,
+        #[arg(long)]
+        order_by: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// List tables in the current database.
+    Tables,
+    /// List databases the user can see.
+    Databases,
+    /// DESCRIBE + SHOW INDEX for one table.
+    Schema {
+        #[arg(long, short = 't')]
+        table: String,
+    },
+    /// Connect, run `SELECT 1`, exit 0/1.
+    Ping,
+    /// Run as a JSON-RPC daemon on a Unix socket.
+    Serve {
+        /// Socket path. Created with mode 0600.
+        #[arg(long = "socket-path")]
+        socket_path: PathBuf,
+    },
+}
+
+/* ------------------------------------------------------------------------- */
+/* main                                                                      */
+/* ------------------------------------------------------------------------- */
+
+fn main() {
+    let cli = Cli::parse();
+    if let Err(e) = run(&cli) {
+        eprintln!("stryke-mysql-helper: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: &Cli) -> Result<()> {
+    match &cli.cmd {
+        Cmd::Query {
+            sql,
+            bind,
+            columnar,
+            with_meta,
+            limit,
+        } => {
+            let mut conn = connect(cli)?;
+            cmd_query(&mut conn, sql, bind.as_deref(), *columnar, *with_meta, *limit)
+        }
+        Cmd::Execute { sql, bind } => {
+            let mut conn = connect(cli)?;
+            let r = exec_execute(&mut conn, sql, bind.as_deref())?;
+            emit_json(&r)
+        }
+        Cmd::Exec { file } => {
+            let mut conn = connect(cli)?;
+            cmd_exec_file(&mut conn, file)
+        }
+        Cmd::Dump {
+            table,
+            columns,
+            where_clause,
+            order_by,
+            limit,
+        } => {
+            let mut conn = connect(cli)?;
+            cmd_dump(
+                &mut conn,
+                table,
+                columns.as_deref(),
+                where_clause.as_deref(),
+                order_by.as_deref(),
+                *limit,
+            )
+        }
+        Cmd::Tables => {
+            let mut conn = connect(cli)?;
+            cmd_tables(&mut conn)
+        }
+        Cmd::Databases => {
+            let mut conn = connect(cli)?;
+            cmd_databases(&mut conn)
+        }
+        Cmd::Schema { table } => {
+            let mut conn = connect(cli)?;
+            cmd_schema(&mut conn, table)
+        }
+        Cmd::Ping => {
+            let mut conn = connect(cli)?;
+            let _: Option<i64> = conn.query_first("SELECT 1")?;
+            println!("ok");
+            Ok(())
+        }
+        Cmd::Serve { socket_path } => cmd_serve(cli, socket_path),
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* connection plumbing                                                       */
+/* ------------------------------------------------------------------------- */
+
+fn build_opts(cli: &Cli) -> Result<Opts> {
+    let mut builder = if let Some(url) = &cli.dsn {
+        let parsed = Opts::from_url(url).context("parsing --dsn URL")?;
+        OptsBuilder::from_opts(parsed)
+    } else {
+        OptsBuilder::new()
+    };
+
+    if let Some(h) = &cli.host {
+        builder = builder.ip_or_hostname(Some(h.as_str()));
+    }
+    if let Some(p) = cli.port {
+        builder = builder.tcp_port(p);
+    }
+    if let Some(u) = &cli.user {
+        builder = builder.user(Some(u.as_str()));
+    }
+    if let Some(pw) = &cli.password {
+        builder = builder.pass(Some(pw.as_str()));
+    }
+    if let Some(db) = &cli.database {
+        builder = builder.db_name(Some(db.as_str()));
+    }
+    if let Some(sock) = &cli.socket {
+        builder = builder.socket(Some(
+            sock.to_str()
+                .ok_or_else(|| anyhow!("--socket path is not valid UTF-8"))?,
+        ));
+    }
+    if cli.ssl || cli.ssl_ca.is_some() {
+        let mut sopts = SslOpts::default();
+        if let Some(ca) = &cli.ssl_ca {
+            sopts = sopts.with_root_cert_path(Some(ca.clone()));
+        }
+        builder = builder.ssl_opts(Some(sopts));
+    }
+    builder = builder.tcp_connect_timeout(Some(Duration::from_secs(cli.connect_timeout)));
+    Ok(Opts::from(builder))
+}
+
+fn connect(cli: &Cli) -> Result<Conn> {
+    let opts = build_opts(cli)?;
+    Conn::new(opts).context("connecting to mysql")
+}
+
+/* ------------------------------------------------------------------------- */
+/* bind-param decoding                                                       */
+/* ------------------------------------------------------------------------- */
+
+/// Parse `--bind` JSON. Accepts:
+///   `[v1, v2, ...]`            → positional `?` placeholders
+///   `{"name": v, ...}`         → named `:name` placeholders
+fn parse_bind(s: Option<&str>) -> Result<Params> {
+    let Some(raw) = s else {
+        return Ok(Params::Empty);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Params::Empty);
+    }
+    let v: Value = serde_json::from_str(raw).context("parsing --bind JSON")?;
+    match v {
+        Value::Array(arr) => Ok(Params::Positional(
+            arr.into_iter().map(json_to_myval).collect(),
+        )),
+        Value::Object(obj) => {
+            let mut map: HashMap<Vec<u8>, MyValue> = HashMap::new();
+            for (k, val) in obj {
+                map.insert(k.into_bytes(), json_to_myval(val));
+            }
+            Ok(Params::Named(map))
+        }
+        Value::Null => Ok(Params::Empty),
+        _ => bail!("--bind must be a JSON array or object"),
+    }
+}
+
+fn json_to_myval(v: Value) -> MyValue {
+    match v {
+        Value::Null => MyValue::NULL,
+        Value::Bool(b) => MyValue::Int(if b { 1 } else { 0 }),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MyValue::Int(i)
+            } else if let Some(u) = n.as_u64() {
+                MyValue::UInt(u)
+            } else if let Some(f) = n.as_f64() {
+                MyValue::Double(f)
+            } else {
+                MyValue::Bytes(n.to_string().into_bytes())
+            }
+        }
+        Value::String(s) => MyValue::Bytes(s.into_bytes()),
+        Value::Array(_) | Value::Object(_) => {
+            // Serialize back to JSON and pass as a string so mysql treats it
+            // as text. Consumer can store in a JSON column.
+            MyValue::Bytes(v.to_string().into_bytes())
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* row → JSON                                                                */
+/* ------------------------------------------------------------------------- */
+
+fn row_to_json(row: &Row) -> Value {
+    let mut out = JMap::with_capacity(row.len());
+    for (i, col) in row.columns_ref().iter().enumerate() {
+        let name = std::str::from_utf8(col.name_ref())
+            .unwrap_or("?")
+            .to_string();
+        let mv: &MyValue = row.as_ref(i).unwrap_or(&MyValue::NULL);
+        out.insert(name, myval_to_json(mv));
+    }
+    Value::Object(out)
+}
+
+fn myval_to_json(v: &MyValue) -> Value {
+    match v {
+        MyValue::NULL => Value::Null,
+        MyValue::Int(i) => json!(*i),
+        MyValue::UInt(u) => json!(*u),
+        MyValue::Float(f) => json!(*f),
+        MyValue::Double(d) => json!(*d),
+        MyValue::Bytes(b) => match std::str::from_utf8(b) {
+            Ok(s) => json!(s),
+            Err(_) => {
+                // Non-UTF-8 blob → base64-encoded string with a sentinel
+                // prefix so consumers can tell it from a normal string.
+                let mut out = String::from("base64:");
+                out.push_str(&B64.encode(b));
+                Value::String(out)
+            }
+        },
+        MyValue::Date(y, m, d, h, mi, s, us) => {
+            if *h == 0 && *mi == 0 && *s == 0 && *us == 0 {
+                json!(format!("{:04}-{:02}-{:02}", y, m, d))
+            } else {
+                json!(format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+                    y, m, d, h, mi, s, us
+                ))
+            }
+        }
+        MyValue::Time(neg, days, h, m, s, us) => {
+            let sign = if *neg { "-" } else { "" };
+            let hours = (*days as u32) * 24 + (*h as u32);
+            json!(format!(
+                "{}{:02}:{:02}:{:02}.{:06}",
+                sign, hours, m, s, us
+            ))
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* commands                                                                  */
+/* ------------------------------------------------------------------------- */
+
+fn cmd_query(
+    conn: &mut Conn,
+    sql: &str,
+    bind: Option<&str>,
+    columnar: bool,
+    with_meta: bool,
+    limit: Option<usize>,
+) -> Result<()> {
+    let params = parse_bind(bind)?;
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+
+    let mut result = conn.exec_iter(sql, params).context("exec_iter")?;
+    let set = result.iter().ok_or_else(|| anyhow!("query returned no result set"))?;
+
+    let columns: Vec<String> = set
+        .columns()
+        .as_ref()
+        .iter()
+        .map(|c| {
+            std::str::from_utf8(c.name_ref())
+                .unwrap_or("?")
+                .to_string()
+        })
+        .collect();
+
+    if columnar {
+        let mut rows: Vec<Value> = Vec::new();
+        let mut count = 0usize;
+        for row in set {
+            let row = row?;
+            let mut arr: Vec<Value> = Vec::with_capacity(row.len());
+            for i in 0..row.len() {
+                let mv: &MyValue = row.as_ref(i).unwrap_or(&MyValue::NULL);
+                arr.push(myval_to_json(mv));
+            }
+            rows.push(Value::Array(arr));
+            count += 1;
+            if let Some(l) = limit {
+                if count >= l {
+                    break;
+                }
+            }
+        }
+        let obj = json!({
+            "columns": columns,
+            "num_rows": rows.len(),
+            "rows": rows,
+        });
+        serde_json::to_writer(&mut out, &obj)?;
+        out.write_all(b"\n")?;
+    } else {
+        if with_meta {
+            let meta = json!({ "meta": { "columns": columns } });
+            serde_json::to_writer(&mut out, &meta)?;
+            out.write_all(b"\n")?;
+        }
+        let mut count = 0usize;
+        for row in set {
+            let row = row?;
+            let v = row_to_json(&row);
+            serde_json::to_writer(&mut out, &v)?;
+            out.write_all(b"\n")?;
+            count += 1;
+            if let Some(l) = limit {
+                if count >= l {
+                    break;
+                }
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct ExecResult {
+    affected_rows: u64,
+    last_insert_id: Option<u64>,
+    warnings: u16,
+    info: String,
+}
+
+fn exec_execute(conn: &mut Conn, sql: &str, bind: Option<&str>) -> Result<ExecResult> {
+    let params = parse_bind(bind)?;
+    let (info, warnings) = {
+        let mut result = conn.exec_iter(sql, params).context("exec_iter")?;
+        while let Some(set) = result.iter() {
+            for _ in set {}
+        }
+        (result.info_str().to_string(), result.warnings())
+    };
+    let affected_rows = conn.affected_rows();
+    let last_insert_id = match conn.last_insert_id() {
+        0 => None,
+        v => Some(v),
+    };
+    Ok(ExecResult {
+        affected_rows,
+        last_insert_id,
+        warnings,
+        info,
+    })
+}
+
+fn cmd_exec_file(conn: &mut Conn, file: &PathBuf) -> Result<()> {
+    let raw = fs::read_to_string(file)
+        .with_context(|| format!("reading {}", file.display()))?;
+    let stmts = split_statements(&raw);
+    let mut results: Vec<Value> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        if stmt.trim().is_empty() {
+            continue;
+        }
+        let mut result = conn.exec_iter(&stmt, Params::Empty)?;
+        while let Some(set) = result.iter() {
+            for _ in set {}
+        }
+        results.push(json!({
+            "sql": stmt,
+            "affected_rows": result.affected_rows(),
+            "last_insert_id": result.last_insert_id(),
+            "warnings": result.warnings(),
+        }));
+    }
+    emit_json(&Value::Array(results))
+}
+
+fn split_statements(src: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut prev = '\0';
+    for c in src.chars() {
+        match c {
+            '\'' if !in_double && !in_backtick && prev != '\\' => in_single = !in_single,
+            '"' if !in_single && !in_backtick && prev != '\\' => in_double = !in_double,
+            '`' if !in_single && !in_double => in_backtick = !in_backtick,
+            ';' if !in_single && !in_double && !in_backtick => {
+                let s = std::mem::take(&mut buf);
+                out.push(s);
+                prev = c;
+                continue;
+            }
+            _ => {}
+        }
+        buf.push(c);
+        prev = c;
+    }
+    if !buf.trim().is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+fn cmd_dump(
+    conn: &mut Conn,
+    table: &str,
+    columns: Option<&str>,
+    where_clause: Option<&str>,
+    order_by: Option<&str>,
+    limit: Option<usize>,
+) -> Result<()> {
+    let cols = columns.unwrap_or("*");
+    let mut sql = format!("SELECT {} FROM {}", cols, quote_ident(table));
+    if let Some(w) = where_clause {
+        sql.push_str(" WHERE ");
+        sql.push_str(w);
+    }
+    if let Some(o) = order_by {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(o);
+    }
+    if let Some(n) = limit {
+        sql.push_str(&format!(" LIMIT {}", n));
+    }
+    cmd_query(conn, &sql, None, false, false, None)
+}
+
+fn cmd_tables(conn: &mut Conn) -> Result<()> {
+    let rows: Vec<String> = conn.query("SHOW TABLES")?;
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    for r in rows {
+        serde_json::to_writer(&mut out, &json!({ "name": r }))?;
+        out.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+fn cmd_databases(conn: &mut Conn) -> Result<()> {
+    let rows: Vec<String> = conn.query("SHOW DATABASES")?;
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    for r in rows {
+        serde_json::to_writer(&mut out, &json!({ "name": r }))?;
+        out.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+fn cmd_schema(conn: &mut Conn, table: &str) -> Result<()> {
+    let columns = collect_rows(conn, &format!("DESCRIBE {}", quote_ident(table)))?;
+    let indexes = collect_rows(conn, &format!("SHOW INDEX FROM {}", quote_ident(table)))?;
+    let out = json!({
+        "table": table,
+        "columns": columns,
+        "indexes": indexes,
+    });
+    emit_json(&out)
+}
+
+/// Run a query and collect every row as `serde_json::Value`. Owns the
+/// QueryResult for its full lifetime so the borrow ends before the next
+/// query starts.
+fn collect_rows(conn: &mut Conn, sql: &str) -> Result<Vec<Value>> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut result = conn.query_iter(sql)?;
+    if let Some(set) = result.iter() {
+        for row in set {
+            out.push(row_to_json(&row?));
+        }
+    }
+    Ok(out)
+}
+
+fn quote_ident(s: &str) -> String {
+    let escaped = s.replace('`', "``");
+    format!("`{}`", escaped)
+}
+
+fn emit_json<T: serde::Serialize>(v: &T) -> Result<()> {
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    serde_json::to_writer(&mut out, v)?;
+    out.write_all(b"\n")?;
+    Ok(())
+}
+
+/* ------------------------------------------------------------------------- */
+/* serve mode — JSON-RPC over Unix socket                                    */
+/* ------------------------------------------------------------------------- */
+
+#[derive(serde::Deserialize)]
+struct Req {
+    id: Value,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(serde::Serialize)]
+struct Resp {
+    id: Value,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn cmd_serve(cli: &Cli, socket_path: &PathBuf) -> Result<()> {
+    // Best-effort cleanup of a stale socket from a prior run.
+    let _ = fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("binding {}", socket_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(socket_path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(socket_path, perms)?;
+    }
+    // Log readiness to stderr so the spawning stryke side can wait for it.
+    eprintln!("stryke-mysql-helper: listening on {}", socket_path.display());
+
+    let opts = build_opts(cli)?;
+
+    for stream in listener.incoming() {
+        let stream = stream?;
+        if let Err(e) = serve_client(stream, &opts) {
+            eprintln!("stryke-mysql-helper: client closed with error: {e:#}");
+        }
+    }
+    Ok(())
+}
+
+fn serve_client(stream: UnixStream, opts: &Opts) -> Result<()> {
+    let reader = BufReader::new(stream.try_clone()?);
+    let mut writer = BufWriter::new(stream);
+    let mut conn = Conn::new(opts.clone())?;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let req: Req = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                write_resp(&mut writer, &Resp {
+                    id: Value::Null,
+                    ok: false,
+                    result: None,
+                    error: Some(format!("parse error: {e}")),
+                })?;
+                continue;
+            }
+        };
+        let resp = handle_rpc(&mut conn, &req);
+        write_resp(&mut writer, &resp)?;
+        if req.method == "close" || req.method == "shutdown" {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn write_resp<W: Write>(w: &mut W, resp: &Resp) -> Result<()> {
+    serde_json::to_writer(&mut *w, resp)?;
+    w.write_all(b"\n")?;
+    w.flush()?;
+    Ok(())
+}
+
+fn handle_rpc(conn: &mut Conn, req: &Req) -> Resp {
+    let result = match req.method.as_str() {
+        "ping" => {
+            let _: Option<i64> = match conn.query_first("SELECT 1") {
+                Ok(v) => v,
+                Err(e) => return err_resp(&req.id, e.to_string()),
+            };
+            Ok(json!("ok"))
+        }
+        "query" => rpc_query(conn, &req.params),
+        "execute" => rpc_execute(conn, &req.params),
+        "tables" => {
+            let v: Vec<String> = match conn.query("SHOW TABLES") {
+                Ok(v) => v,
+                Err(e) => return err_resp(&req.id, e.to_string()),
+            };
+            Ok(json!(v))
+        }
+        "databases" => {
+            let v: Vec<String> = match conn.query("SHOW DATABASES") {
+                Ok(v) => v,
+                Err(e) => return err_resp(&req.id, e.to_string()),
+            };
+            Ok(json!(v))
+        }
+        "schema" => rpc_schema(conn, &req.params),
+        "close" | "shutdown" => Ok(json!("bye")),
+        other => Err(anyhow!("unknown method `{other}`")),
+    };
+    match result {
+        Ok(v) => Resp {
+            id: req.id.clone(),
+            ok: true,
+            result: Some(v),
+            error: None,
+        },
+        Err(e) => err_resp(&req.id, e.to_string()),
+    }
+}
+
+fn err_resp(id: &Value, msg: String) -> Resp {
+    Resp {
+        id: id.clone(),
+        ok: false,
+        result: None,
+        error: Some(msg),
+    }
+}
+
+fn rpc_query(conn: &mut Conn, params: &Value) -> Result<Value> {
+    let sql = params
+        .get("sql")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("query: missing `sql`"))?;
+    let bind = params_to_params(params.get("bind"))?;
+    let mut result = conn.exec_iter(sql, bind)?;
+    let mut rows: Vec<Value> = Vec::new();
+    let mut columns: Vec<String> = Vec::new();
+    if let Some(set) = result.iter() {
+        columns = set
+            .columns()
+            .as_ref()
+            .iter()
+            .map(|c| {
+                std::str::from_utf8(c.name_ref())
+                    .unwrap_or("?")
+                    .to_string()
+            })
+            .collect();
+        for row in set {
+            let row = row?;
+            rows.push(row_to_json(&row));
+        }
+    }
+    Ok(json!({
+        "columns": columns,
+        "rows": rows,
+    }))
+}
+
+fn rpc_execute(conn: &mut Conn, params: &Value) -> Result<Value> {
+    let sql = params
+        .get("sql")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("execute: missing `sql`"))?;
+    let bind = params_to_params(params.get("bind"))?;
+    let mut result = conn.exec_iter(sql, bind)?;
+    while let Some(set) = result.iter() {
+        for _ in set {}
+    }
+    Ok(json!({
+        "affected_rows": result.affected_rows(),
+        "last_insert_id": result.last_insert_id(),
+        "warnings": result.warnings(),
+    }))
+}
+
+fn rpc_schema(conn: &mut Conn, params: &Value) -> Result<Value> {
+    let table = params
+        .get("table")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("schema: missing `table`"))?;
+    let columns = collect_rows(conn, &format!("DESCRIBE {}", quote_ident(table)))?;
+    let indexes = collect_rows(conn, &format!("SHOW INDEX FROM {}", quote_ident(table)))?;
+    Ok(json!({
+        "table": table,
+        "columns": columns,
+        "indexes": indexes,
+    }))
+}
+
+fn params_to_params(v: Option<&Value>) -> Result<Params> {
+    match v {
+        None | Some(Value::Null) => Ok(Params::Empty),
+        Some(Value::Array(arr)) => Ok(Params::Positional(
+            arr.iter().cloned().map(json_to_myval).collect(),
+        )),
+        Some(Value::Object(obj)) => {
+            let mut map: HashMap<Vec<u8>, MyValue> = HashMap::new();
+            for (k, val) in obj {
+                map.insert(k.as_bytes().to_vec(), json_to_myval(val.clone()));
+            }
+            Ok(Params::Named(map))
+        }
+        _ => bail!("bind must be array or object"),
+    }
+}

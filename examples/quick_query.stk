@@ -1,0 +1,20 @@
+#!/usr/bin/env stryke
+# examples/quick_query.stk — pull a few rows from MySQL.
+#
+# Run:    MYSQL_DSN='mysql://user:pass@127.0.0.1/dbname' s examples/quick_query.stk
+
+use MySQL
+
+my $dsn = $ENV{MYSQL_DSN}
+die "set \$MYSQL_DSN\n" unless defined $dsn
+
+p "tables: " . join(", ", MySQL::tables(dsn => $dsn))
+
+my @rows = MySQL::query(
+    "SELECT user, host FROM mysql.user LIMIT 5",
+    dsn => $dsn,
+)
+p "user@host rows:"
+for my $r (@rows) {
+    p "  $r->{user}\@$r->{host}"
+}

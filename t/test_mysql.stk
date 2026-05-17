@@ -1,0 +1,122 @@
+# t/test_mysql.stk — round-trip tests against a live MySQL.
+#
+# Skips cleanly when $MYSQL_DSN is unset OR the helper isn't built.
+# Live tests use $MYSQL_DSN; suggested local dev value:
+#   export MYSQL_DSN="mysql://root:secret@127.0.0.1:3306/test"
+
+require "./lib/MySQL.stk"
+
+my $have_helper = eval { MySQL::helper_path(); 1 }
+my $dsn = $ENV{MYSQL_DSN}
+
+unless ($have_helper) {
+    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+    exit 0
+}
+unless (defined $dsn && $dsn ne "") {
+    p "1..0 # SKIP \$MYSQL_DSN not set"
+    exit 0
+}
+unless (MySQL::ping(dsn => $dsn)) {
+    p "1..0 # SKIP cannot connect to $dsn"
+    exit 0
+}
+
+my $tbl = "stryke_mysql_test_$$"
+p "1..10"
+my $i = 0
+
+eval { MySQL::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
+my $r
+eval {
+    $r = MySQL::execute(
+        "CREATE TABLE $tbl (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(64), score DOUBLE)",
+        dsn => $dsn,
+    )
+}
+$i++
+p $@ ? "not ok $i - create table: $@" : "ok $i - create table"
+
+eval {
+    $r = MySQL::execute(
+        "INSERT INTO $tbl (name, score) VALUES (?, ?), (?, ?), (?, ?)",
+        dsn  => $dsn,
+        bind => ["alice", 1.5, "bob", 2.0, "charlie", 3.25],
+    )
+}
+$i++
+p $@ ? "not ok $i - insert: $@" :
+       ($r->{affected_rows} == 3 ? "ok $i - insert 3 rows" :
+        "not ok $i - insert affected=$r->{affected_rows}")
+
+my @rows
+eval { @rows = MySQL::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - select: $@" :
+       (len(@rows) == 3 ? "ok $i - select 3 rows" :
+        "not ok $i - select got " . len(@rows) . " rows")
+
+eval { @rows = MySQL::query("SELECT * FROM $tbl WHERE name = ?", dsn => $dsn, bind => ["bob"]) }
+$i++
+p $@ ? "not ok $i - bind query: $@" :
+       (len(@rows) == 1 && $rows[0]->{name} eq "bob"
+            ? "ok $i - bind query"
+            : "not ok $i - bind query wrong shape")
+
+my $scalar
+eval { $scalar = MySQL::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - query_scalar: $@" :
+       ($scalar == 3 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $scalar")
+
+my $one
+eval { $one = MySQL::query_one("SELECT * FROM $tbl WHERE name = ?", dsn => $dsn, bind => ["alice"]) }
+$i++
+p $@ ? "not ok $i - query_one: $@" :
+       (defined $one && $one->{name} eq "alice"
+            ? "ok $i - query_one"
+            : "not ok $i - query_one wrong")
+
+my @col
+eval { @col = MySQL::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - query_col: $@" :
+       (len(@col) == 3 && $col[0] eq "alice"
+            ? "ok $i - query_col"
+            : "not ok $i - query_col wrong")
+
+my $sch
+eval { $sch = MySQL::schema($tbl, dsn => $dsn) }
+$i++
+p $@ ? "not ok $i - schema: $@" :
+       (ref($sch->{columns}) eq "ARRAY" && len(@{$sch->{columns}}) == 3
+            ? "ok $i - schema"
+            : "not ok $i - schema bad shape")
+
+my @tables
+eval { @tables = MySQL::tables(dsn => $dsn) }
+$i++
+if ($@) {
+    p "not ok $i - tables: $@"
+} else {
+    my $found = 0
+    for my $t (@tables) {
+        $found = 1 if $t eq $tbl
+    }
+    p ($found ? "ok $i - tables (found $tbl)"
+              : "not ok $i - tables missing $tbl (out of " . len(@tables) . ")")
+}
+
+my $r2
+eval {
+    $r2 = MySQL::insert_many($tbl,
+        [{ name => "dana", score => 4.0 },
+         { name => "eve",  score => 5.5 }],
+        dsn => $dsn,
+    )
+}
+$i++
+p $@ ? "not ok $i - insert_many: $@" :
+       ($r2->{affected_rows} == 2 ? "ok $i - insert_many" : "not ok $i - insert_many wrong count")
+
+eval { MySQL::execute("DROP TABLE $tbl", dsn => $dsn) }

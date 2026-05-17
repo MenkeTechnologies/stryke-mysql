@@ -1,0 +1,27 @@
+#!/usr/bin/env stryke
+# examples/bulk_load.stk — load an array of hashes into a MySQL table.
+#
+# Run:    MYSQL_DSN='mysql://…' s examples/bulk_load.stk
+
+use MySQL
+
+my $dsn = $ENV{MYSQL_DSN}
+die "set \$MYSQL_DSN\n" unless defined $dsn
+
+my $tbl = "stryke_demo_$$"
+
+MySQL::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn)
+MySQL::execute(
+    "CREATE TABLE $tbl (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(64), v DOUBLE)",
+    dsn => $dsn,
+)
+
+my @rows = map {
+    { name => "row_$_", v => $_ * 1.5 }
+} (1:100)
+
+my $r = MySQL::insert_many($tbl, \@rows, dsn => $dsn)
+p "inserted #{$r->{affected_rows}} rows; last_insert_id=#{$r->{last_insert_id}}"
+
+p "count: " . MySQL::query_scalar("SELECT COUNT(*) FROM $tbl", dsn => $dsn)
+MySQL::execute("DROP TABLE $tbl", dsn => $dsn)

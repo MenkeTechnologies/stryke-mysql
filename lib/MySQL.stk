@@ -1,0 +1,360 @@
+# lib/MySQL.stk — MySQL / MariaDB client for stryke (single-shot).
+#
+# Architecture mirrors stryke-arrow: thin stryke wrapper invokes the
+# `stryke-mysql-helper` Rust binary (mysql crate) per call, parses NDJSON
+# rows from its stdout.
+#
+# v1 is single-shot — every query opens a fresh connection. The helper
+# already implements a long-running JSON-RPC `serve` mode on a Unix socket;
+# the stryke side will pick that up once stryke gains a Unix-socket client
+# builtin. For hot loops today, batch with multi-row INSERT or use the CLI
+# `mysql exec --file=script.sql` pattern.
+#
+# DSN sources (priority order):
+#   1. `dsn => "mysql://..."` named arg
+#   2. `$ENV{MYSQL_DSN}` env var
+#   3. Individual host/port/user/password/database args
+#
+# Note: internal helpers pass `$opts` as a hashref rather than `%opts` slurp
+# because stryke currently drops named opts when flattening through nested
+# same-package calls loaded from a required file (smoke-tested 2026-05).
+# Public API still accepts `%opts` named-args for caller ergonomics.
+
+package MySQL
+
+our $HELPER
+
+fn MySQL::pkg_root {
+    my @parts = split "/", __FILE__
+    pop @parts
+    pop @parts
+    my $root = join "/", @parts
+    $root ne "" ? $root : "."
+}
+
+fn MySQL::helper_path {
+    return $MySQL::HELPER if defined $MySQL::HELPER && -x $MySQL::HELPER
+
+    if (exists $ENV{STRYKE_MYSQL_HELPER} && $ENV{STRYKE_MYSQL_HELPER} ne "") {
+        my $p = $ENV{STRYKE_MYSQL_HELPER}
+        die "stryke-mysql: STRYKE_MYSQL_HELPER=$p is not an executable file" unless -x $p
+        $MySQL::HELPER = $p
+        return $p
+    }
+
+    my $root = MySQL::pkg_root()
+    for my $cand (
+        "$root/target/release/stryke-mysql-helper",
+        "$root/target/debug/stryke-mysql-helper",
+        "$root/bin/stryke-mysql-helper",
+    ) {
+        if (-x $cand) {
+            $MySQL::HELPER = $cand
+            return $cand
+        }
+    }
+
+    my $which = qx{command -v stryke-mysql-helper 2>/dev/null}
+    chomp $which
+    if ($which ne "" && -x $which) {
+        $MySQL::HELPER = $which
+        return $which
+    }
+
+    die "stryke-mysql: helper binary not found.\n" .
+        "  Build it once with:  cd $root && cargo build --release\n" .
+        "  Or set STRYKE_MYSQL_HELPER=/path/to/stryke-mysql-helper\n"
+}
+
+fn MySQL::ensure_built {
+    my $root = MySQL::pkg_root()
+    for my $cand ("$root/target/release/stryke-mysql-helper",
+                  "$root/target/debug/stryke-mysql-helper") {
+        return $cand if -x $cand
+    }
+    return MySQL::helper_path() if exists $ENV{STRYKE_MYSQL_HELPER}
+
+    p "stryke-mysql: building helper (cargo build --release)..."
+    my $rc = system "cd " . MySQL::_shq($root) . " && cargo build --release"
+    die "stryke-mysql: cargo build failed (rc=$rc)" if $rc != 0
+    MySQL::helper_path()
+}
+
+# Single-quote shell-escape: wrap in '…' and replace embedded ' with '\'' .
+fn MySQL::_shq ($s) {
+    my $t = $s
+    $t =~ s/'/'\\''/g
+    "'$t'"
+}
+
+# Build the leading `helper subcmd ...connection-flags...` portion of the
+# command line. $o is a hashref.
+fn MySQL::_conn_argv ($o) {
+    my @argv = (MySQL::_shq(MySQL::helper_path()))
+
+    my $dsn = $o->{dsn} // $ENV{MYSQL_DSN}
+    if (defined $dsn && $dsn ne "") {
+        push @argv, "--dsn", MySQL::_shq($dsn)
+    }
+    for my $pair (
+        [host     => "--host"],
+        [port     => "--port"],
+        [user     => "--user"],
+        [password => "--password"],
+        [database => "--database"],
+        [socket   => "--socket"],
+        [ssl_ca   => "--ssl-ca"],
+    ) {
+        my ($k, $flag) = @$pair
+        if (exists $o->{$k} && defined $o->{$k}) {
+            push @argv, $flag, MySQL::_shq($o->{$k})
+        }
+    }
+    push @argv, "--ssl" if $o->{ssl}
+    if (exists $o->{connect_timeout} && defined $o->{connect_timeout}) {
+        push @argv, "--connect-timeout", MySQL::_shq($o->{connect_timeout})
+    }
+    @argv
+}
+
+fn MySQL::_bind_flag ($bind) {
+    return () unless defined $bind
+    ("--bind", MySQL::_shq(to_json $bind))
+}
+
+# Drain a `-|` filehandle into a list of from_json'd row hashes.
+fn MySQL::_drain_ndjson ($fh) {
+    my @rows
+    while (my $line = <$fh>) {
+        chomp $line
+        next if $line eq ""
+        push @rows, from_json $line
+    }
+    @rows
+}
+
+# Internal: run a `query`/`dump`/`tables`/`databases` subcommand and return
+# the parsed NDJSON rows. $argv is a pre-built array of shell-quoted tokens.
+fn MySQL::_run_ndjson ($argv) {
+    my $cmd = join " ", @$argv
+    open my $fh, "-|", $cmd or die "stryke-mysql: spawn failed: $!"
+    my @rows = MySQL::_drain_ndjson $fh
+    close $fh or die "stryke-mysql: helper exited ($?)"
+    @rows
+}
+
+# Internal: run a subcommand and return its captured JSON (single object).
+fn MySQL::_run_json ($argv) {
+    my $cmd = join " ", @$argv
+    my $out = qx{$cmd}
+    die "stryke-mysql: helper exited ($?)" if $? != 0
+    from_json $out
+}
+
+# ---------------------------------------------------------------------------
+# Public read API
+# ---------------------------------------------------------------------------
+
+# Public: accepts named-args; delegates to _query_impl with a hashref.
+fn MySQL::query ($sql, %opts) {
+    MySQL::_query_impl($sql, \%opts)
+}
+
+fn MySQL::_query_impl ($sql, $o) {
+    my @argv = MySQL::_conn_argv($o)
+    push @argv, "query", MySQL::_shq($sql)
+    push @argv, MySQL::_bind_flag($o->{bind})
+    push @argv, "--columnar" if $o->{columnar}
+    push @argv, "--with-meta" if $o->{with_meta}
+    if (defined $o->{limit}) {
+        push @argv, "--limit", MySQL::_shq($o->{limit})
+    }
+    if ($ENV{STRYKE_MYSQL_DEBUG}) {
+        warn "DEBUG mysql cmd: " . join(" ", @argv) . "\n"
+    }
+
+    if ($o->{columnar}) {
+        return MySQL::_run_json(\@argv)
+    }
+    if ($o->{with_meta}) {
+        my $cmd = join " ", @argv
+        my $out = qx{$cmd}
+        die "MySQL::query: helper exited ($?)" if $? != 0
+        return MySQL::_parse_metarows($out)
+    }
+    MySQL::_run_ndjson(\@argv)
+}
+
+# Streaming variant: callback fires once per row. Returns the count.
+fn MySQL::query_stream ($sql, %opts) {
+    my $cb = $opts{callback}
+    die "MySQL::query_stream: callback => sub { … } is required" unless defined $cb
+
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "query", MySQL::_shq($sql)
+    push @argv, MySQL::_bind_flag($opts{bind})
+    if (defined $opts{limit}) {
+        push @argv, "--limit", MySQL::_shq($opts{limit})
+    }
+    my $cmd = join " ", @argv
+
+    my $n = 0
+    open my $fh, "-|", $cmd or die "MySQL::query_stream: spawn failed: $!"
+    while (my $line = <$fh>) {
+        chomp $line
+        next if $line eq ""
+        $cb->(from_json $line)
+        $n++
+    }
+    close $fh or die "MySQL::query_stream: helper exited ($?)"
+    $n
+}
+
+# Internal: --with-meta output is `{meta:{…}}` line, then NDJSON rows.
+fn MySQL::_parse_metarows ($buf) {
+    my @lines = split /\n/, $buf
+    my @rows
+    my $meta = {}
+    for my $line (@lines) {
+        next if $line eq ""
+        my $v = from_json $line
+        if (ref($v) eq "HASH" && exists $v->{meta}) {
+            $meta = $v->{meta}
+        } else {
+            push @rows, $v
+        }
+    }
+    { meta => $meta, rows => \@rows }
+}
+
+# Single row (or undef when empty). Adds LIMIT 1 server-side.
+fn MySQL::query_one ($sql, %opts) {
+    $opts{limit} = 1
+    my @r = MySQL::_query_impl($sql, \%opts)
+    @r ? $r[0] : undef
+}
+
+# First column of every row as a flat array.
+fn MySQL::query_col ($sql, %opts) {
+    my @rows = MySQL::_query_impl($sql, \%opts)
+    return () unless @rows
+    my @keys = keys %{ $rows[0] }
+    my $first = $keys[0]
+    map { $_->{$first} } @rows
+}
+
+# Single scalar (first column of first row, or undef).
+fn MySQL::query_scalar ($sql, %opts) {
+    $opts{limit} = 1
+    my @r = MySQL::_query_impl($sql, \%opts)
+    return undef unless @r
+    my @keys = keys %{ $r[0] }
+    $r[0]->{$keys[0]}
+}
+
+# ---------------------------------------------------------------------------
+# Public write API
+# ---------------------------------------------------------------------------
+
+# Returns { affected_rows, last_insert_id, warnings, info }.
+fn MySQL::execute ($sql, %opts) {
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "execute", MySQL::_shq($sql)
+    push @argv, MySQL::_bind_flag($opts{bind})
+    MySQL::_run_json(\@argv)
+}
+
+# Multi-statement script. Returns an array of per-statement results.
+fn MySQL::exec_file ($path, %opts) {
+    die "MySQL::exec_file: file `$path` not found" unless -e $path
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "exec", "--file", MySQL::_shq($path)
+    MySQL::_run_json(\@argv)
+}
+
+# Bulk insert. Auto-builds `INSERT INTO table (cols…) VALUES (?,?,…), (?,?,…)…`.
+fn MySQL::insert_many ($table, $rows, %opts) {
+    my $arr = ref($rows) eq "ARRAY" ? $rows : [$rows]
+    return { affected_rows => 0, last_insert_id => undef } unless @$arr
+
+    my @cols = sort keys %{ $arr->[0] }
+    my $ncols = len @cols
+    my $tuple = "(" . join(",", ("?") x $ncols) . ")"
+    my $sql = "INSERT INTO `$table` (" .
+              join(",", map { "`$_`" } @cols) .
+              ") VALUES " .
+              join(",", ($tuple) x len(@$arr))
+    my @bind
+    for my $row (@$arr) {
+        for my $c (@cols) {
+            push @bind, $row->{$c}
+        }
+    }
+    $opts{bind} = \@bind
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "execute", MySQL::_shq($sql)
+    push @argv, MySQL::_bind_flag(\@bind)
+    MySQL::_run_json(\@argv)
+}
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+fn MySQL::ping (%opts) {
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "ping"
+    my $cmd = join " ", @argv
+    my $out = qx{$cmd 2>/dev/null}
+    chomp $out
+    $? == 0 && $out eq "ok"
+}
+
+fn MySQL::tables (%opts) {
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "tables"
+    map { $_->{name} } MySQL::_run_ndjson(\@argv)
+}
+
+fn MySQL::databases (%opts) {
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "databases"
+    map { $_->{name} } MySQL::_run_ndjson(\@argv)
+}
+
+# { table, columns => [...], indexes => [...] } via DESCRIBE + SHOW INDEX.
+fn MySQL::schema ($table, %opts) {
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "schema", "--table", MySQL::_shq($table)
+    MySQL::_run_json(\@argv)
+}
+
+fn MySQL::dump ($table, %opts) {
+    my @argv = MySQL::_conn_argv(\%opts)
+    push @argv, "dump", "--table", MySQL::_shq($table)
+    if (defined $opts{columns}) {
+        my $cols = ref($opts{columns}) eq "ARRAY"
+            ? join(",", @{ $opts{columns} })
+            : $opts{columns}
+        push @argv, "--columns", MySQL::_shq($cols)
+    }
+    if (defined $opts{where}) {
+        push @argv, "--where", MySQL::_shq($opts{where})
+    }
+    if (defined $opts{order_by}) {
+        push @argv, "--order-by", MySQL::_shq($opts{order_by})
+    }
+    if (defined $opts{limit}) {
+        push @argv, "--limit", MySQL::_shq($opts{limit})
+    }
+    MySQL::_run_ndjson(\@argv)
+}
+
+fn MySQL::version {
+    my $bin = MySQL::_shq(MySQL::helper_path())
+    my $v = qx{$bin --version 2>&1}
+    chomp $v
+    $v
+}
+
+1

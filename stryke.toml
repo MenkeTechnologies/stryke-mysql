@@ -1,0 +1,19 @@
+[package]
+name = "mysql"
+version = "0.1.0"
+description = "MySQL / MariaDB client for stryke. Opt-in package tier; persistent connection daemon over a Unix socket plus single-shot mode."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-mysql"
+edition = "2026"
+
+[bin]
+mysql = "bin/mysql.stk"
+mysql-build = "bin/mysql-build.stk"
+
+[scripts]
+build = "cargo build --release"
+build-debug = "cargo build"
+clean = "cargo clean"
+test = "s test t/"
+install = "s pkg install -g ."

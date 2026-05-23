@@ -1,11 +1,45 @@
-# stryke-mysql
+```
+ ███████╗████████╗██████╗ ██╗   ██╗██╗  ██╗███████╗
+ ██╔════╝╚══██╔══╝██╔══██╗╚██╗ ██╔╝██║ ██╔╝██╔════╝
+ ███████╗   ██║   ██████╔╝ ╚████╔╝ █████╔╝ █████╗
+ ╚════██║   ██║   ██╔══██╗  ╚██╔╝  ██╔═██╗ ██╔══╝
+ ███████║   ██║   ██║  ██║   ██║   ██║  ██╗███████╗
+ ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+                   [ m y s q l ]
+```
+
+[![CI](https://github.com/MenkeTechnologies/stryke-mysql/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/stryke-mysql/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
+
+### `[MYSQL / MARIADB CLIENT FOR STRYKE // OPT-IN PACKAGE]`
+
+> *"SQL without the connection ceremony."*
 
 MySQL / MariaDB client for stryke. Opt-in package, kept out of the stryke
 core binary so the daily-driver install stays slim.
 
-Created by MenkeTechnologies.
+### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-postgres`](https://github.com/MenkeTechnologies/stryke-postgres) · [`stryke-mongo`](https://github.com/MenkeTechnologies/stryke-mongo) · [`stryke-redis`](https://github.com/MenkeTechnologies/stryke-redis) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
-## Why this is a package, not a builtin
+---
+
+## Table of Contents
+
+- [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Quick start](#0x02-quick-start)
+- [\[0x03\] CLI: `mysql`](#0x03-cli-mysql)
+- [\[0x04\] API reference](#0x04-api-reference)
+- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x06\] Type encoding](#0x06-type-encoding)
+- [\[0x07\] Tests](#0x07-tests)
+- [\[0x08\] Dev workflow](#0x08-dev-workflow)
+- [\[0x09\] Layout](#0x09-layout)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] Why this is a package, not a builtin
 
 Same rationale as [stryke-arrow](../stryke-arrow): MySQL clients pull in a
 big native dependency (`mysql` + TLS stack + Tokio for async variants). Most
@@ -16,7 +50,7 @@ this package.
 (`stryke-mysql-helper`) built from this repo. The stryke side spawns the
 helper per call and parses NDJSON over a pipe.
 
-## Install
+## [0x01] Install
 
 ```sh
 cd ~/projects/stryke-mysql
@@ -30,7 +64,7 @@ Or:
 make install
 ```
 
-## Quick start
+## [0x02] Quick start
 
 ```stryke
 use MySQL
@@ -71,7 +105,7 @@ DSN sources (priority order):
 2. `$ENV{MYSQL_DSN}`
 3. Individual flags: `host`, `port`, `user`, `password`, `database`, `socket`
 
-## CLI: `mysql`
+## [0x03] CLI: `mysql`
 
 ```sh
 mysql query   "SELECT * FROM users WHERE id = ?" --bind='[42]'
@@ -101,7 +135,7 @@ Connection flags (also accept env vars):
 --connect-timeout SECONDS
 ```
 
-## API reference
+## [0x04] API reference
 
 ### Read paths
 
@@ -144,7 +178,7 @@ MySQL::ensure_built()   → $abs_path     # cargo-builds if missing
 MySQL::version()        → "stryke-mysql-helper 0.1.0"
 ```
 
-## Helper protocol
+## [0x05] Helper protocol
 
 The Rust helper speaks JSON over stdin/stdout/argv — useful directly:
 
@@ -182,7 +216,7 @@ The stryke side's persistent-connect API will pick this up once stryke gains a
 Unix-socket client builtin. For now the lib is single-shot; the daemon is
 useful directly from any language with a Unix-socket client.
 
-## Type encoding
+## [0x06] Type encoding
 
 MySQL → JSON encoding:
 
@@ -202,7 +236,7 @@ MySQL → JSON encoding:
 `BLOB` columns that aren't valid UTF-8 come back with a `"base64:"` prefix so
 consumers can detect and decode them.
 
-## Tests
+## [0x07] Tests
 
 ```sh
 cargo test                                  # unit tests (none yet — scaffold)
@@ -212,7 +246,7 @@ MYSQL_DSN='mysql://…' s test t/             # end-to-end against live MySQL
 The end-to-end suite skips cleanly when `$MYSQL_DSN` is unset or the helper
 isn't built.
 
-## Dev workflow
+## [0x08] Dev workflow
 
 ```sh
 make             # release build
@@ -222,7 +256,7 @@ make install     # release + pkg install -g .
 make clean
 ```
 
-## Layout
+## [0x09] Layout
 
 ```
 stryke-mysql/
@@ -246,6 +280,6 @@ stryke-mysql/
     release.yml                # cross-compile + GH release on tag push
 ```
 
-## License
+## [0xFF] License
 
 MIT.

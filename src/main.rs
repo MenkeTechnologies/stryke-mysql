@@ -850,3 +850,302 @@ fn params_to_params(v: Option<&Value>) -> Result<Params> {
         _ => bail!("bind must be array or object"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── parse_bind ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_bind_none_empty() {
+        assert!(matches!(parse_bind(None).unwrap(), Params::Empty));
+    }
+
+    #[test]
+    fn parse_bind_blank_string_empty() {
+        assert!(matches!(parse_bind(Some("")).unwrap(), Params::Empty));
+        assert!(matches!(parse_bind(Some("   ")).unwrap(), Params::Empty));
+    }
+
+    #[test]
+    fn parse_bind_null_treated_as_empty() {
+        assert!(matches!(parse_bind(Some("null")).unwrap(), Params::Empty));
+    }
+
+    #[test]
+    fn parse_bind_array_is_positional() {
+        match parse_bind(Some("[1, 2, 3]")).unwrap() {
+            Params::Positional(v) => assert_eq!(v.len(), 3),
+            other => panic!("expected Positional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_object_is_named() {
+        match parse_bind(Some(r#"{"id":42,"name":"x"}"#)).unwrap() {
+            Params::Named(m) => {
+                assert_eq!(m.len(), 2);
+                assert!(m.contains_key(&b"id".to_vec()));
+                assert!(m.contains_key(&b"name".to_vec()));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_scalar_rejected() {
+        let err = parse_bind(Some("42")).unwrap_err();
+        assert!(format!("{err}").contains("array or object"));
+    }
+
+    #[test]
+    fn parse_bind_invalid_json_errors() {
+        let err = parse_bind(Some("{not json}")).unwrap_err();
+        assert!(format!("{err}").to_lowercase().contains("parsing"));
+    }
+
+    // ─── json_to_myval ───────────────────────────────────────────────
+
+    #[test]
+    fn json_to_myval_null() {
+        assert!(matches!(json_to_myval(Value::Null), MyValue::NULL));
+    }
+
+    #[test]
+    fn json_to_myval_bool_maps_to_int() {
+        // MySQL has no bool — booleans store as TINYINT(1).
+        match json_to_myval(json!(true)) {
+            MyValue::Int(1) => {}
+            other => panic!("expected Int(1), got {other:?}"),
+        }
+        match json_to_myval(json!(false)) {
+            MyValue::Int(0) => {}
+            other => panic!("expected Int(0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_myval_positive_int_is_int() {
+        assert!(matches!(json_to_myval(json!(42)), MyValue::Int(42)));
+        assert!(matches!(json_to_myval(json!(-5)), MyValue::Int(-5)));
+    }
+
+    #[test]
+    fn json_to_myval_large_unsigned_is_uint() {
+        let big: u64 = i64::MAX as u64 + 1;
+        match json_to_myval(json!(big)) {
+            MyValue::UInt(u) => assert_eq!(u, big),
+            other => panic!("expected UInt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_myval_float_is_double() {
+        match json_to_myval(json!(2.5)) {
+            MyValue::Double(f) => assert_eq!(f, 2.5),
+            other => panic!("expected Double, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_myval_string_is_bytes() {
+        match json_to_myval(json!("hi")) {
+            MyValue::Bytes(b) => assert_eq!(b, b"hi"),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_myval_array_serialized_to_bytes() {
+        // Container types → JSON string → bytes (MySQL JSON column-friendly).
+        match json_to_myval(json!([1, 2, 3])) {
+            MyValue::Bytes(b) => assert_eq!(b, b"[1,2,3]"),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_myval_object_serialized_to_bytes() {
+        match json_to_myval(json!({"k":1})) {
+            MyValue::Bytes(b) => assert_eq!(b, br#"{"k":1}"#),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    // ─── myval_to_json ───────────────────────────────────────────────
+
+    #[test]
+    fn myval_to_json_null() {
+        assert_eq!(myval_to_json(&MyValue::NULL), Value::Null);
+    }
+
+    #[test]
+    fn myval_to_json_int_variants() {
+        assert_eq!(myval_to_json(&MyValue::Int(7)), json!(7));
+        assert_eq!(myval_to_json(&MyValue::UInt(99)), json!(99));
+        assert_eq!(myval_to_json(&MyValue::Double(1.5)), json!(1.5));
+        assert_eq!(myval_to_json(&MyValue::Float(0.5)), json!(0.5));
+    }
+
+    #[test]
+    fn myval_to_json_utf8_bytes_become_string() {
+        assert_eq!(
+            myval_to_json(&MyValue::Bytes(b"hello".to_vec())),
+            json!("hello"),
+        );
+    }
+
+    #[test]
+    fn myval_to_json_non_utf8_bytes_base64_prefixed() {
+        // 0xFF, 0xFE — invalid UTF-8 — encoded with base64: sentinel prefix.
+        let v = myval_to_json(&MyValue::Bytes(vec![0xff, 0xfe]));
+        let s = v.as_str().unwrap();
+        assert!(s.starts_with("base64:"));
+        let decoded = B64.decode(s.strip_prefix("base64:").unwrap()).unwrap();
+        assert_eq!(decoded, vec![0xff, 0xfe]);
+    }
+
+    #[test]
+    fn myval_to_json_date_only_when_time_components_zero() {
+        let v = myval_to_json(&MyValue::Date(2024, 3, 14, 0, 0, 0, 0));
+        assert_eq!(v, json!("2024-03-14"));
+    }
+
+    #[test]
+    fn myval_to_json_datetime_includes_time_and_microseconds() {
+        let v = myval_to_json(&MyValue::Date(2024, 3, 14, 13, 45, 6, 123456));
+        assert_eq!(v, json!("2024-03-14 13:45:06.123456"));
+    }
+
+    #[test]
+    fn myval_to_json_time_negative_sign() {
+        // -2 days, 5h, 30m, 0s, 0us → -53:30:00.000000
+        let v = myval_to_json(&MyValue::Time(true, 2, 5, 30, 0, 0));
+        assert_eq!(v, json!("-53:30:00.000000"));
+    }
+
+    #[test]
+    fn myval_to_json_time_positive() {
+        // 0 days, 1h, 0m, 0s, 0us → 01:00:00.000000
+        let v = myval_to_json(&MyValue::Time(false, 0, 1, 0, 0, 0));
+        assert_eq!(v, json!("01:00:00.000000"));
+    }
+
+    // ─── split_statements ────────────────────────────────────────────
+
+    #[test]
+    fn split_statements_basic_semicolons() {
+        let s = split_statements("SELECT 1; SELECT 2; SELECT 3");
+        assert_eq!(s.len(), 3);
+        assert!(s[0].contains("SELECT 1"));
+        assert!(s[1].contains("SELECT 2"));
+        assert!(s[2].contains("SELECT 3"));
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolon_in_single_quotes() {
+        let s = split_statements("INSERT INTO t VALUES ('a;b'); SELECT 1");
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains("'a;b'"));
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolon_in_double_quotes() {
+        let s = split_statements(r#"SELECT "x;y"; SELECT 1"#);
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains(r#""x;y""#));
+    }
+
+    #[test]
+    fn split_statements_ignores_semicolon_in_backticks() {
+        let s = split_statements("SELECT `weird;ident` FROM t; SELECT 2");
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains("`weird;ident`"));
+    }
+
+    #[test]
+    fn split_statements_drops_trailing_blank_segment() {
+        // After trailing ';' the trim().is_empty() guard drops it.
+        let s = split_statements("SELECT 1;   ");
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn split_statements_empty_input_empty_vec() {
+        assert!(split_statements("").is_empty());
+        assert!(split_statements("   ").is_empty());
+    }
+
+    #[test]
+    fn split_statements_single_stmt_no_semicolon() {
+        let s = split_statements("SELECT 1");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0], "SELECT 1");
+    }
+
+    // ─── quote_ident ─────────────────────────────────────────────────
+
+    #[test]
+    fn quote_ident_wraps_in_backticks() {
+        assert_eq!(quote_ident("users"), "`users`");
+    }
+
+    #[test]
+    fn quote_ident_doubles_internal_backtick() {
+        // MySQL identifier escaping: ` → ``
+        assert_eq!(quote_ident("a`b"), "`a``b`");
+    }
+
+    #[test]
+    fn quote_ident_preserves_dots_and_spaces() {
+        assert_eq!(quote_ident("my.schema"), "`my.schema`");
+        assert_eq!(quote_ident("col name"), "`col name`");
+    }
+
+    // ─── err_resp / params_to_params ─────────────────────────────────
+
+    #[test]
+    fn err_resp_marks_failure_and_carries_id_and_msg() {
+        let r = err_resp(&json!(7), "boom".into());
+        let s = serde_json::to_value(&r).unwrap();
+        assert_eq!(s["id"], json!(7));
+        assert_eq!(s["ok"], json!(false));
+        assert_eq!(s["error"], json!("boom"));
+        // skip_serializing_if dropped `result`.
+        assert!(!s.as_object().unwrap().contains_key("result"));
+    }
+
+    #[test]
+    fn params_to_params_none_or_null_is_empty() {
+        assert!(matches!(params_to_params(None).unwrap(), Params::Empty));
+        assert!(matches!(
+            params_to_params(Some(&Value::Null)).unwrap(),
+            Params::Empty
+        ));
+    }
+
+    #[test]
+    fn params_to_params_array_positional() {
+        let v = json!([1, "x"]);
+        match params_to_params(Some(&v)).unwrap() {
+            Params::Positional(p) => assert_eq!(p.len(), 2),
+            other => panic!("expected Positional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn params_to_params_object_named() {
+        let v = json!({"a": 1, "b": 2});
+        match params_to_params(Some(&v)).unwrap() {
+            Params::Named(m) => assert_eq!(m.len(), 2),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn params_to_params_scalar_rejected() {
+        let err = params_to_params(Some(&json!(42))).unwrap_err();
+        assert!(format!("{err}").contains("array or object"));
+    }
+}

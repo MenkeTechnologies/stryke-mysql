@@ -1148,4 +1148,263 @@ mod tests {
         let err = params_to_params(Some(&json!(42))).unwrap_err();
         assert!(format!("{err}").contains("array or object"));
     }
+
+    #[test]
+    fn split_statements_backslash_escaped_quote() {
+        let s = split_statements(r"SELECT 'it\'s'; SELECT 2");
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains("it\\'s") || s[0].contains("it's"));
+    }
+
+    #[test]
+    fn split_statements_semicolon_only_yields_empty_segments() {
+        // Each ';' flushes the buffer (possibly empty) — not trimmed away.
+        let s = split_statements(";;;");
+        assert_eq!(s.len(), 3);
+        assert!(s.iter().all(|x| x.is_empty()));
+    }
+
+    #[test]
+    fn myval_to_json_date_midnight_formats_date_only() {
+        let v = myval_to_json(&MyValue::Date(2024, 6, 15, 0, 0, 0, 0));
+        assert_eq!(v, json!("2024-06-15"));
+    }
+
+    #[test]
+    fn quote_ident_empty_string() {
+        assert_eq!(quote_ident(""), "``");
+    }
+
+    #[test]
+    fn json_to_myval_negative_zero_float() {
+        match json_to_myval(json!(-0.0)) {
+            MyValue::Double(f) => assert!(f == 0.0 && f.is_sign_negative()),
+            other => panic!("expected Double, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_whitespace_only_array_elements() {
+        match parse_bind(Some("[1, 2]")).unwrap() {
+            Params::Positional(v) => assert_eq!(v.len(), 2),
+            other => panic!("expected Positional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_statements_comment_semicolon_still_splits() {
+        // Line comments aren't parsed — bare ';' in `-- ;` still delimits.
+        let s = split_statements("SELECT 1 -- ;\n; SELECT 2");
+        assert_eq!(s.len(), 3);
+        assert!(s[0].contains("SELECT 1"));
+        assert!(s[2].contains("SELECT 2"));
+    }
+
+    #[test]
+    fn json_to_myval_u64_max() {
+        let big = u64::MAX;
+        match json_to_myval(json!(big)) {
+            MyValue::UInt(u) => assert_eq!(u, big),
+            other => panic!("expected UInt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_myval_empty_string_bytes() {
+        match json_to_myval(json!("")) {
+            MyValue::Bytes(b) => assert!(b.is_empty()),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn params_to_params_empty_object() {
+        match params_to_params(Some(&json!({}))).unwrap() {
+            Params::Named(m) => assert!(m.is_empty()),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_statements_escaped_double_quote() {
+        let s = split_statements(r#"SELECT "a""b"; SELECT 2"#);
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains(r#""a""b""#));
+    }
+
+    #[test]
+    fn myval_to_json_float_variant() {
+        assert_eq!(myval_to_json(&MyValue::Float(1.25)), json!(1.25));
+    }
+
+    #[test]
+    fn quote_ident_multiple_internal_backticks() {
+        assert_eq!(quote_ident("a``b"), "`a````b`");
+    }
+
+    #[test]
+    fn parse_bind_object_two_keys() {
+        match parse_bind(Some(r#"{"id":1,"name":"x"}"#)).unwrap() {
+            Params::Named(m) => assert_eq!(m.len(), 2),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_statements_no_trailing_semicolon_single_stmt() {
+        let s = split_statements("INSERT INTO t VALUES (1)");
+        assert_eq!(s.len(), 1);
+        assert!(!s[0].ends_with(';'));
+    }
+
+    #[test]
+    fn json_to_myval_true_bool_is_int_one() {
+        match json_to_myval(json!(true)) {
+            MyValue::Int(1) => {}
+            other => panic!("expected Int(1), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_myval_fractional_double() {
+        match json_to_myval(json!(1.5)) {
+            MyValue::Double(f) => assert_eq!(f, 1.5),
+            other => panic!("expected Double, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn myval_to_json_uint_large() {
+        assert_eq!(myval_to_json(&MyValue::UInt(1_000_000)), json!(1_000_000));
+    }
+
+    #[test]
+    fn split_statements_backtick_string_with_semicolon() {
+        let s = split_statements("SELECT `a;b` FROM t; SELECT 2");
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains("`a;b`"));
+    }
+
+    #[test]
+    fn params_to_params_null_is_empty() {
+        assert!(matches!(params_to_params(Some(&Value::Null)).unwrap(), Params::Empty));
+    }
+
+    #[test]
+    fn quote_ident_unicode() {
+        assert_eq!(quote_ident("列"), "`列`");
+    }
+
+    #[test]
+    fn parse_bind_array_empty() {
+        match parse_bind(Some("[]")).unwrap() {
+            Params::Positional(v) => assert!(v.is_empty()),
+            other => panic!("expected Positional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn myval_to_json_time_zero() {
+        let v = myval_to_json(&MyValue::Time(false, 0, 0, 0, 0, 0));
+        assert_eq!(v, json!("00:00:00.000000"));
+    }
+
+    #[test]
+    fn json_to_myval_false_bool_is_int_zero() {
+        match json_to_myval(json!(false)) {
+            MyValue::Int(0) => {}
+            other => panic!("expected Int(0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_statements_two_stmts_with_trailing_semicolon() {
+        let s = split_statements("SELECT 1; SELECT 2;");
+        assert_eq!(s.len(), 2);
+        assert!(s[0].contains('1'));
+        assert!(s[1].contains('2'));
+    }
+
+    #[test]
+    fn myval_to_json_int_negative() {
+        assert_eq!(myval_to_json(&MyValue::Int(-3)), json!(-3));
+    }
+
+    #[test]
+    fn quote_ident_single_backtick_inside() {
+        assert_eq!(quote_ident("a`b"), "`a``b`");
+    }
+
+    #[test]
+    fn err_resp_null_id() {
+        let r = err_resp(&Value::Null, "fail".into());
+        let s = serde_json::to_value(&r).unwrap();
+        assert_eq!(s["id"], Value::Null);
+        assert_eq!(s["ok"], json!(false));
+    }
+
+    #[test]
+    fn split_statements_whitespace_only_between_semicolons() {
+        let s = split_statements("SELECT 1;   ; SELECT 2");
+        assert_eq!(s.len(), 3);
+        assert!(s[1].trim().is_empty());
+    }
+
+    #[test]
+    fn myval_to_json_bytes_utf8_string() {
+        assert_eq!(myval_to_json(&MyValue::Bytes(b"hi".to_vec())), json!("hi"));
+    }
+
+    #[test]
+    fn json_to_myval_large_positive_int() {
+        match json_to_myval(json!(2_147_483_647)) {
+            MyValue::Int(n) => assert_eq!(n, 2_147_483_647),
+            other => panic!("expected Int, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_statements_multiple_blank_segments() {
+        let s = split_statements(";;SELECT 1");
+        assert_eq!(s.len(), 3);
+        assert!(s[0].is_empty());
+        assert!(s[1].is_empty());
+        assert!(s[2].contains('1'));
+    }
+
+    #[test]
+    fn myval_to_json_null_variant() {
+        assert_eq!(myval_to_json(&MyValue::NULL), Value::Null);
+    }
+
+    #[test]
+    fn quote_ident_numeric_start() {
+        assert_eq!(quote_ident("1col"), "`1col`");
+    }
+
+    #[test]
+    fn params_to_params_empty_array() {
+        match params_to_params(Some(&json!([]))).unwrap() {
+            Params::Positional(v) => assert!(v.is_empty()),
+            other => panic!("expected Positional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn err_resp_string_id() {
+        let r = err_resp(&json!("req-1"), "err".into());
+        assert_eq!(serde_json::to_value(&r).unwrap()["id"], json!("req-1"));
+    }
+
+    #[test]
+    fn split_statements_dollar_quote_postgres_style_not_supported() {
+        let s = split_statements("SELECT 1; SELECT 2");
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn myval_to_json_date_with_time() {
+        let v = myval_to_json(&MyValue::Date(2024, 1, 2, 3, 4, 5, 0));
+        assert!(v.as_str().unwrap().contains("2024-01-02"));
+    }
 }

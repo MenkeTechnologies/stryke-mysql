@@ -1407,4 +1407,52 @@ mod tests {
         let v = myval_to_json(&MyValue::Date(2024, 1, 2, 3, 4, 5, 0));
         assert!(v.as_str().unwrap().contains("2024-01-02"));
     }
+
+    #[test]
+    fn json_to_myval_negative_int() {
+        match json_to_myval(json!(-9)) {
+            MyValue::Int(n) => assert_eq!(n, -9),
+            other => panic!("expected Int, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_statements_single_statement_no_semicolon() {
+        assert_eq!(split_statements("SELECT 1").len(), 1);
+    }
+
+    #[test]
+    fn myval_to_json_float() {
+        assert_eq!(myval_to_json(&MyValue::Float(2.0)), json!(2.0));
+    }
+
+    #[test]
+    fn quote_ident_reserved_word() {
+        assert_eq!(quote_ident("select"), "`select`");
+    }
+
+    #[test]
+    fn params_to_params_named_two_keys() {
+        match params_to_params(Some(&json!({"a": 1, "b": 2}))).unwrap() {
+            Params::Named(m) => assert_eq!(m.len(), 2),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn err_resp_ok_false() {
+        let s = serde_json::to_value(&err_resp(&json!(1), "e".into())).unwrap();
+        assert_eq!(s["ok"], json!(false));
+    }
+
+    #[test]
+    fn split_statements_trailing_only_semicolon() {
+        let s = split_statements("SELECT 1;");
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn myval_to_json_uint_zero() {
+        assert_eq!(myval_to_json(&MyValue::UInt(0)), json!(0));
+    }
 }

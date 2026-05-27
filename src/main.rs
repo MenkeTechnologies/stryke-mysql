@@ -1455,4 +1455,36 @@ mod tests {
     fn myval_to_json_uint_zero() {
         assert_eq!(myval_to_json(&MyValue::UInt(0)), json!(0));
     }
+
+    #[test]
+    fn split_statements_two_statements() {
+        assert_eq!(split_statements("SELECT 1; SELECT 2;").len(), 2);
+    }
+
+    #[test]
+    fn json_to_myval_uint_above_i64_max() {
+        let big = (i64::MAX as u64) + 1;
+        match json_to_myval(json!(big)) {
+            MyValue::UInt(n) => assert_eq!(n, big),
+            other => panic!("expected UInt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_statements_semicolon_in_string_not_split() {
+        let s = split_statements("SELECT ';'; SELECT 2;");
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn myval_to_json_bytes_as_base64() {
+        let v = myval_to_json(&MyValue::Bytes(vec![0, 255]));
+        assert!(v.as_str().unwrap().starts_with("base64:"));
+    }
+
+    #[test]
+    fn err_resp_includes_error_string() {
+        let s = serde_json::to_value(&err_resp(&json!(null), "fail".into())).unwrap();
+        assert_eq!(s["error"], json!("fail"));
+    }
 }

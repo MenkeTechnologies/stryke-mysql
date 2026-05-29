@@ -1491,4 +1491,37 @@ mod tests {
         let s = serde_json::to_value(err_resp(&json!(null), "fail".into())).unwrap();
         assert_eq!(s["error"], json!("fail"));
     }
+
+    // ─── parse_bind error-shape pins ─────────────────────────────────
+    //
+    // CLI users grep the rejection text for both the offending shape
+    // and the expected `JSON array or object` template; existing
+    // tests pin the rejection itself but not the message — drift here
+    // silently changes script behavior.
+
+    #[test]
+    fn parse_bind_scalar_error_templates_array_or_object() {
+        let err = parse_bind(Some("42")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("array or object"),
+            "error should hint at expected shape; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_bind_string_scalar_rejected_same_way() {
+        let err = parse_bind(Some("\"nope\"")).unwrap_err();
+        assert!(format!("{err}").contains("array or object"));
+    }
+
+    #[test]
+    fn parse_bind_invalid_json_surfaces_context() {
+        let err = parse_bind(Some("{")).unwrap_err();
+        let chain: Vec<_> = err.chain().map(|c| c.to_string()).collect();
+        assert!(
+            chain.iter().any(|s| s.contains("parsing --bind JSON")),
+            "expected `parsing --bind JSON` context in chain; got {chain:?}"
+        );
+    }
 }

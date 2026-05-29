@@ -37,9 +37,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use mysql::prelude::*;
-use mysql::{
-    Conn, Opts, OptsBuilder, Params, Row, SslOpts, Value as MyValue,
-};
+use mysql::{Conn, Opts, OptsBuilder, Params, Row, SslOpts, Value as MyValue};
 use serde_json::{json, Map as JMap, Value};
 
 /* ------------------------------------------------------------------------- */
@@ -183,7 +181,14 @@ fn run(cli: &Cli) -> Result<()> {
             limit,
         } => {
             let mut conn = connect(cli)?;
-            cmd_query(&mut conn, sql, bind.as_deref(), *columnar, *with_meta, *limit)
+            cmd_query(
+                &mut conn,
+                sql,
+                bind.as_deref(),
+                *columnar,
+                *with_meta,
+                *limit,
+            )
         }
         Cmd::Execute { sql, bind } => {
             let mut conn = connect(cli)?;
@@ -383,11 +388,8 @@ fn myval_to_json(v: &MyValue) -> Value {
         }
         MyValue::Time(neg, days, h, m, s, us) => {
             let sign = if *neg { "-" } else { "" };
-            let hours = (*days as u32) * 24 + (*h as u32);
-            json!(format!(
-                "{}{:02}:{:02}:{:02}.{:06}",
-                sign, hours, m, s, us
-            ))
+            let hours = *days * 24 + (*h as u32);
+            json!(format!("{}{:02}:{:02}:{:02}.{:06}", sign, hours, m, s, us))
         }
     }
 }
@@ -409,17 +411,15 @@ fn cmd_query(
     let mut out = BufWriter::new(stdout.lock());
 
     let mut result = conn.exec_iter(sql, params).context("exec_iter")?;
-    let set = result.iter().ok_or_else(|| anyhow!("query returned no result set"))?;
+    let set = result
+        .iter()
+        .ok_or_else(|| anyhow!("query returned no result set"))?;
 
     let columns: Vec<String> = set
         .columns()
         .as_ref()
         .iter()
-        .map(|c| {
-            std::str::from_utf8(c.name_ref())
-                .unwrap_or("?")
-                .to_string()
-        })
+        .map(|c| std::str::from_utf8(c.name_ref()).unwrap_or("?").to_string())
         .collect();
 
     if columnar {
@@ -502,8 +502,7 @@ fn exec_execute(conn: &mut Conn, sql: &str, bind: Option<&str>) -> Result<ExecRe
 }
 
 fn cmd_exec_file(conn: &mut Conn, file: &PathBuf) -> Result<()> {
-    let raw = fs::read_to_string(file)
-        .with_context(|| format!("reading {}", file.display()))?;
+    let raw = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let stmts = split_statements(&raw);
     let mut results: Vec<Value> = Vec::with_capacity(stmts.len());
     for stmt in stmts {
@@ -672,7 +671,10 @@ fn cmd_serve(cli: &Cli, socket_path: &PathBuf) -> Result<()> {
         fs::set_permissions(socket_path, perms)?;
     }
     // Log readiness to stderr so the spawning stryke side can wait for it.
-    eprintln!("stryke-mysql-helper: listening on {}", socket_path.display());
+    eprintln!(
+        "stryke-mysql-helper: listening on {}",
+        socket_path.display()
+    );
 
     let opts = build_opts(cli)?;
 
@@ -698,12 +700,15 @@ fn serve_client(stream: UnixStream, opts: &Opts) -> Result<()> {
         let req: Req = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                write_resp(&mut writer, &Resp {
-                    id: Value::Null,
-                    ok: false,
-                    result: None,
-                    error: Some(format!("parse error: {e}")),
-                })?;
+                write_resp(
+                    &mut writer,
+                    &Resp {
+                        id: Value::Null,
+                        ok: false,
+                        result: None,
+                        error: Some(format!("parse error: {e}")),
+                    },
+                )?;
                 continue;
             }
         };
@@ -786,11 +791,7 @@ fn rpc_query(conn: &mut Conn, params: &Value) -> Result<Value> {
             .columns()
             .as_ref()
             .iter()
-            .map(|c| {
-                std::str::from_utf8(c.name_ref())
-                    .unwrap_or("?")
-                    .to_string()
-            })
+            .map(|c| std::str::from_utf8(c.name_ref()).unwrap_or("?").to_string())
             .collect();
         for row in set {
             let row = row?;
@@ -886,8 +887,8 @@ mod tests {
         match parse_bind(Some(r#"{"id":42,"name":"x"}"#)).unwrap() {
             Params::Named(m) => {
                 assert_eq!(m.len(), 2);
-                assert!(m.contains_key(&b"id".to_vec()));
-                assert!(m.contains_key(&b"name".to_vec()));
+                assert!(m.contains_key(b"id".as_slice()));
+                assert!(m.contains_key(b"name".as_slice()));
             }
             other => panic!("expected Named, got {other:?}"),
         }
@@ -1287,7 +1288,10 @@ mod tests {
 
     #[test]
     fn params_to_params_null_is_empty() {
-        assert!(matches!(params_to_params(Some(&Value::Null)).unwrap(), Params::Empty));
+        assert!(matches!(
+            params_to_params(Some(&Value::Null)).unwrap(),
+            Params::Empty
+        ));
     }
 
     #[test]
@@ -1441,7 +1445,7 @@ mod tests {
 
     #[test]
     fn err_resp_ok_false() {
-        let s = serde_json::to_value(&err_resp(&json!(1), "e".into())).unwrap();
+        let s = serde_json::to_value(err_resp(&json!(1), "e".into())).unwrap();
         assert_eq!(s["ok"], json!(false));
     }
 
@@ -1484,7 +1488,7 @@ mod tests {
 
     #[test]
     fn err_resp_includes_error_string() {
-        let s = serde_json::to_value(&err_resp(&json!(null), "fail".into())).unwrap();
+        let s = serde_json::to_value(err_resp(&json!(null), "fail".into())).unwrap();
         assert_eq!(s["error"], json!("fail"));
     }
 }

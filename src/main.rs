@@ -1524,4 +1524,81 @@ mod tests {
             "expected `parsing --bind JSON` context in chain; got {chain:?}"
         );
     }
+
+    // ─── clap parsing — Cli top-level + Cmd routing ─────────────────────
+    // Pin: required positionals, default connect timeout, subcommand
+    // routing. Drift here would silently change which timeouts apply
+    // or break stryke `qx` shell glue.
+
+    fn parse_cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["stryke-mysql-helper"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    #[test]
+    fn cli_ping_unit_variant() {
+        let cli = parse_cli(&["ping"]).expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Ping));
+    }
+
+    #[test]
+    fn cli_query_requires_sql_positional() {
+        let err = parse_cli(&["query"]).err().expect("missing sql must err");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cli_connect_timeout_default_is_ten_seconds() {
+        // Pin: 10s is the MySQL helper's tolerated wait. Drift to
+        // a higher number would hide unreachable-server bugs in callers;
+        // lower would break local-network restarts.
+        let cli = parse_cli(&["ping"]).expect("parse");
+        assert_eq!(cli.connect_timeout, 10);
+    }
+
+    #[test]
+    fn cli_dump_table_flag_required() {
+        // --table is the dump selector; without it the SHORT-FOR-SELECT
+        // surface has nothing to scan.
+        let err = parse_cli(&["dump"])
+            .err()
+            .expect("missing --table must err");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cli_schema_requires_table_flag() {
+        let err = parse_cli(&["schema"])
+            .err()
+            .expect("missing --table must err");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cli_serve_requires_socket_path() {
+        // Daemon mode without --socket-path can't bind anywhere.
+        let err = parse_cli(&["serve"])
+            .err()
+            .expect("missing --socket-path must err");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cli_query_columnar_and_with_meta_default_false() {
+        // Pin: NDJSON is the default output mode; columnar/meta opt-in.
+        // Drift to default-on would break streaming consumers.
+        let cli = parse_cli(&["query", "SELECT 1"]).expect("parse");
+        match &cli.cmd {
+            Cmd::Query {
+                columnar,
+                with_meta,
+                ..
+            } => {
+                assert!(!columnar, "default must be NDJSON, not columnar");
+                assert!(!with_meta, "meta line must be opt-in");
+            }
+            _ => panic!("expected Query"),
+        }
+    }
 }

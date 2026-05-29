@@ -175,7 +175,7 @@ MySQL::schema     $table, %opts → { table, columns => [...], indexes => [...] 
 ```stryke
 MySQL::helper_path()    → $abs_path
 MySQL::ensure_built()   → $abs_path     # cargo-builds if missing
-MySQL::version()        → "stryke-mysql-helper 0.1.0"
+MySQL::version()        → "stryke-mysql-helper 0.1.1"
 ```
 
 ## [0x05] Helper protocol

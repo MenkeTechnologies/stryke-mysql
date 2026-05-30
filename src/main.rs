@@ -1601,4 +1601,130 @@ mod tests {
             _ => panic!("expected Query"),
         }
     }
+
+    // ─── clap parsing — global Cli flags + additional Cmd surfaces ─────
+    // Previous round pinned ping/query-sql/connect-timeout/dump/schema/
+    // serve required-flags. These pin: (a) all DSN/host/port/user/
+    // password/database/socket/ssl global flags default to "let driver
+    // pick" (None or false); (b) Execute requires sql; (c) Exec requires
+    // --file; (d) Tables/Databases unit-variants route; (e) Dump optional
+    // selectors --columns/--where/--order-by/--limit all thread through.
+
+    #[test]
+    fn cli_global_connection_flags_all_default_unset() {
+        // Pin: bare `ping` populates Cli with all-None / ssl=false. Drift
+        // to a populated default (e.g. host="localhost") would mask actual
+        // env-var resolution failures with a silent loopback connect.
+        let cli = parse_cli(&["ping"]).expect("parse");
+        assert!(cli.dsn.is_none());
+        assert!(cli.host.is_none());
+        assert!(cli.port.is_none());
+        assert!(cli.user.is_none());
+        assert!(cli.password.is_none());
+        assert!(cli.database.is_none());
+        assert!(cli.socket.is_none());
+        assert!(!cli.ssl);
+        assert!(cli.ssl_ca.is_none());
+    }
+
+    #[test]
+    fn cli_global_connection_flags_thread_through() {
+        // Pin: all globals bind into their matched fields, with --ssl
+        // flipping the bool. Drift to last-flag-wins or silent drop would
+        // change the actual connection URL on every helper invocation.
+        let cli = parse_cli(&[
+            "--host",
+            "db.internal",
+            "--port",
+            "3307",
+            "--user",
+            "ro",
+            "--database",
+            "app",
+            "--ssl",
+            "ping",
+        ])
+        .expect("parse");
+        assert_eq!(cli.host.as_deref(), Some("db.internal"));
+        assert_eq!(cli.port, Some(3307));
+        assert_eq!(cli.user.as_deref(), Some("ro"));
+        assert_eq!(cli.database.as_deref(), Some("app"));
+        assert!(cli.ssl);
+    }
+
+    #[test]
+    fn cli_execute_requires_sql_and_exec_requires_file() {
+        // Pin: Execute mirrors Query's sql-required contract for DDL/DML;
+        // Exec requires --file (no implicit script path).
+        use clap::error::ErrorKind::MissingRequiredArgument;
+        assert_eq!(
+            parse_cli(&["execute"]).err().expect("missing sql").kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["exec"]).err().expect("missing --file").kind(),
+            MissingRequiredArgument
+        );
+        let cli = parse_cli(&["execute", "DELETE FROM t WHERE 1=0"]).expect("parse");
+        match cli.cmd {
+            Cmd::Execute { sql, bind } => {
+                assert_eq!(sql, "DELETE FROM t WHERE 1=0");
+                assert!(bind.is_none());
+            }
+            _ => panic!("expected Execute"),
+        }
+        let cli = parse_cli(&["exec", "--file", "/tmp/migrations.sql"]).expect("parse");
+        match cli.cmd {
+            Cmd::Exec { file } => assert_eq!(file, PathBuf::from("/tmp/migrations.sql")),
+            _ => panic!("expected Exec"),
+        }
+    }
+
+    #[test]
+    fn cli_tables_databases_are_unit_variants() {
+        // Pin: both list-style commands take no positionals/flags.
+        // Drift to required-arg would break the `qx mysql tables` glue.
+        assert!(matches!(parse_cli(&["tables"]).unwrap().cmd, Cmd::Tables));
+        assert!(matches!(
+            parse_cli(&["databases"]).unwrap().cmd,
+            Cmd::Databases
+        ));
+    }
+
+    #[test]
+    fn cli_dump_optional_selectors_thread_through() {
+        // Pin: --columns / --where / --order-by / --limit all default None
+        // and bind correctly when supplied. Drift would silently strip the
+        // user-specified projection or ordering from the SELECT.
+        let cli = parse_cli(&[
+            "dump",
+            "--table",
+            "users",
+            "--columns",
+            "id,name",
+            "--where",
+            "id > 100",
+            "--order-by",
+            "id DESC",
+            "--limit",
+            "50",
+        ])
+        .expect("parse");
+        match cli.cmd {
+            Cmd::Dump {
+                table,
+                columns,
+                where_clause,
+                order_by,
+                limit,
+            } => {
+                assert_eq!(table, "users");
+                assert_eq!(columns.as_deref(), Some("id,name"));
+                assert_eq!(where_clause.as_deref(), Some("id > 100"));
+                assert_eq!(order_by.as_deref(), Some("id DESC"));
+                assert_eq!(limit, Some(50));
+            }
+            _ => panic!("expected Dump"),
+        }
+    }
 }

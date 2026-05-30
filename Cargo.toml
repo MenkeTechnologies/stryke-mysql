@@ -2,7 +2,7 @@
 name = "stryke-mysql-helper"
 version = "0.1.1"
 edition = "2021"
-description = "MySQL / MariaDB bridge binary for the stryke `mysql` package."
+description = "MySQL / MariaDB bridge binary for the stryke `mysql` package"
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-mysql"

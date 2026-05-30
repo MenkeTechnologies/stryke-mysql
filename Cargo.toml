@@ -6,6 +6,7 @@ description = "MySQL / MariaDB bridge binary for the stryke `mysql` package."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-mysql"
+homepage = "https://menketechnologies.github.io/stryke-mysql/"
 publish = false
 
 [[bin]]

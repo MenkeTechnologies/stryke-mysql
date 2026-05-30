@@ -175,7 +175,7 @@ MySQL::schema     $table, %opts → { table, columns => [...], indexes => [...] 
 ```stryke
 MySQL::helper_path()    → $abs_path
 MySQL::ensure_built()   → $abs_path     # cargo-builds if missing
-MySQL::version()        → "stryke-mysql-helper 0.1.1"
+MySQL::version()        → "stryke-mysql-helper X.Y.Z"
 ```
 
 ## [0x05] Helper protocol
@@ -239,7 +239,7 @@ consumers can detect and decode them.
 ## [0x07] Tests
 
 ```sh
-cargo test                                  # unit tests (none yet — scaffold)
+cargo test                                  # unit + contract tests, no live calls
 MYSQL_DSN='mysql://…' s test t/             # end-to-end against live MySQL
 ```
 

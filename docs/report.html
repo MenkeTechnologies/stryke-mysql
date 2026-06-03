@@ -94,7 +94,7 @@
 
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>EXECUTIVE SUMMARY</h2>
       <p class="tutorial-subtitle"><strong>stryke-mysql</strong> is one of the 14 opt-in connector packages in the stryke ecosystem. MySQL / MariaDB client for stryke. Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim. Output is NDJSON-by-default for shell pipelines.</p>
-      <p class="tutorial-subtitle"><code>sqlx</code>/<code>mysql_async</code> deps pull in tokio + async-std + TLS chains. Bundled once, opt-in.</p>
+      <p class="tutorial-subtitle">The <code>mysql</code> crate pulls in a native libmysql-style protocol stack + TLS chains. Bundled once, opt-in.</p>
 
       <div class="stat-grid">
         <div class="stat-card"><div class="stat-val">mysql</div><div class="stat-label">CLI launcher</div></div>
@@ -110,7 +110,7 @@
         <thead><tr><th>Layer</th><th>Implementation</th></tr></thead>
         <tbody>
           <tr><td>stryke library (<code>lib/*.stk</code>)</td><td>Thin wrapper exposing typed functions; serializes args to NDJSON, deserializes responses</td></tr>
-          <tr><td>Helper binary (<code>stryke-mysql-helper</code>)</td><td>Rust async (tokio); reads NDJSON from stdin, dispatches, writes NDJSON to stdout</td></tr>
+          <tr><td>Helper binary (<code>stryke-mysql-helper</code>)</td><td>Rust sync; reads NDJSON from stdin, dispatches, writes NDJSON to stdout</td></tr>
           <tr><td>Process model</td><td>One helper subprocess per stryke session; lives as long as the stryke runtime needs it</td></tr>
           <tr><td>Build</td><td>Cargo with <code>publish = false</code> on the helper crate; the package itself ships via <code>s pkg install -g .</code></td></tr>
           <tr><td>Install path</td><td><code>~/.stryke/bin/mysql</code> after <code>make install</code>; PATH-resolvable from any shell</td></tr>
@@ -121,7 +121,7 @@
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">$</span>WHY OPT-IN (NOT BUILTIN)</h2>
-      <p><code>sqlx</code>/<code>mysql_async</code> deps pull in tokio + async-std + TLS chains. Bundled once, opt-in.</p>
+      <p>The <code>mysql</code> crate pulls in a native libmysql-style protocol stack + TLS chains. Bundled once, opt-in.</p>
       <p>The trade-off is intentional. The core <code>stryke</code> binary stays under ~40 MB precisely because each connector ships separately. Daily-driver work (one-liners, awk replacement, data scripting) doesn't need MongoDB drivers, AWS SDKs, or Spark Connect bindings linked in.</p>
 
       <hr class="section-rule">

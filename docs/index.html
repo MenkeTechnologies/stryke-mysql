@@ -141,7 +141,7 @@ mysql --help</pre>
 
       <section class="tutorial-section">
         <h2>Why a package, not a builtin</h2>
-        <p><code>sqlx</code>/<code>mysql_async</code> deps pull in tokio + async-std + TLS chains. Bundled once, opt-in.</p>
+        <p>The <code>mysql</code> crate pulls in a native libmysql-style protocol stack + TLS chains. Bundled once, opt-in.</p>
         <p>The stryke side is a thin NDJSON-pipe wrapper; the heavy code lives in the <code>stryke-mysql-helper</code> sidecar binary and is loaded on demand. Core stryke is never linked against this package's deps.</p>
       </section>
 

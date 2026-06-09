@@ -1,23 +1,23 @@
 # t/test_mysql.stk — round-trip tests against a live MySQL.
 #
-# Skips cleanly when $MYSQL_DSN is unset OR the helper isn't built.
-# Live tests use $MYSQL_DSN; suggested local dev value:
-#   export MYSQL_DSN="mysql://root:secret@127.0.0.1:3306/test"
+# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
+# from the package root so stryke's FFI bridge dlopens
+# lib/libstryke_mysql.{dylib,so} on `use MySQL`.
 
-require "./lib/MySQL.stk"
+use MySQL
 
-my $have_helper = eval { MySQL::helper_path(); 1 }
-my $dsn = $ENV{MYSQL_DSN}
+my $have_cdylib = eval { MySQL::version(); 1 }
+my $dsn = $ENV{MYSQL_URL} // $ENV{MYSQL_DSN}
 
-unless ($have_helper) {
-    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+unless ($have_cdylib) {
+    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 unless (defined $dsn && $dsn ne "") {
-    p "1..0 # SKIP \$MYSQL_DSN not set"
+    p "1..0 # SKIP \$MYSQL_URL not set"
     exit 0
 }
-unless (MySQL::ping(dsn => $dsn)) {
+unless (eval { MySQL::ping(url => $dsn) }) {
     p "1..0 # SKIP cannot connect to $dsn"
     exit 0
 }

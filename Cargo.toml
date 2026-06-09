@@ -1,17 +1,18 @@
 [package]
-name = "stryke-mysql-helper"
-version = "0.1.1"
+name = "stryke-mysql"
+version = "0.2.0"
 edition = "2021"
-description = "MySQL / MariaDB bridge binary for the stryke `mysql` package"
+description = "MySQL / MariaDB cdylib for the stryke `mysql` package — dlopened in-process via stryke's FFI bridge, with a persistent mysql::Pool per connection URL."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-mysql"
 homepage = "https://menketechnologies.github.io/stryke-mysql/"
 publish = false
 
-[[bin]]
-name = "stryke-mysql-helper"
-path = "src/main.rs"
+[lib]
+name = "stryke_mysql"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
 
 [dependencies]
 mysql = { version = "28", default-features = false, features = [
@@ -19,14 +20,12 @@ mysql = { version = "28", default-features = false, features = [
     "buffer-pool",
     "client_ed25519",
 ] }
-clap = { version = "4", default-features = false, features = [
-    "std", "derive", "help", "usage", "error-context", "env",
-] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
-base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+once_cell = "1"
+parking_lot = "0.12"
 
 [profile.release]
 opt-level = 3

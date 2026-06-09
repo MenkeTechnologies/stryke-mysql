@@ -52,10 +52,18 @@ helper per call and parses NDJSON over a pipe.
 
 ## [0x01] Install
 
+From a release (no rustc on the consumer machine):
+
+```sh
+s pkg install -g github.com/MenkeTechnologies/stryke-mysql
+```
+
+From a local checkout:
+
 ```sh
 cd ~/projects/stryke-mysql
-cargo build --release        # produces target/release/stryke-mysql-helper
-s pkg install -g .           # installs `mysql` and `mysql-build` CLIs
+cargo build --release        # produces target/release/libstryke_mysql.{dylib,so}
+s pkg install -g .           # cdylib lands in ~/.stryke/store/mysql@<version>/
 ```
 
 Or:
@@ -63,6 +71,10 @@ Or:
 ```sh
 make install
 ```
+
+The cdylib is dlopened in-process on first `use MySQL`. A `mysql::Pool`
+cache keyed by connection URL is held in `OnceCell` — no fork-per-call,
+no fresh TCP+auth handshake.
 
 ## [0x02] Quick start
 

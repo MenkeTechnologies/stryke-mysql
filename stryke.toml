@@ -1,15 +1,28 @@
 [package]
 name = "mysql"
-version = "0.1.0"
-description = "MySQL / MariaDB client for stryke. Opt-in package tier; persistent connection daemon over a Unix socket plus single-shot mode."
+version = "0.2.0"
+description = "MySQL / MariaDB client for stryke. cdylib loaded in-process — persistent mysql::Pool per connection URL across calls."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-mysql"
 edition = "2026"
 
-[bin]
-mysql = "bin/mysql.stk"
-mysql-build = "bin/mysql-build.stk"
+[ffi]
+lib-name = "stryke_mysql"
+namespace = "MySQL"
+exports = [
+    "mysql__pkg_version",
+    "mysql__version",
+    "mysql__ping",
+    "mysql__databases",
+    "mysql__tables",
+    "mysql__schema",
+    "mysql__query",
+    "mysql__execute",
+    "mysql__exec",
+    "mysql__insert_many",
+    "mysql__dump",
+]
 
 [scripts]
 build = "cargo build --release"

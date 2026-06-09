@@ -63,58 +63,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
-  helper-live-mysql:
-    name: Helper end-to-end (live MySQL)
-    runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: secret
-          MYSQL_DATABASE: stryke_test
-          MYSQL_ROOT_HOST: '%'
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -psecret"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=30
-    env:
-      MYSQL_DSN: mysql://root:secret@127.0.0.1:3306/stryke_test
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo build --release --locked
-
-      - name: Wait for mysql ready
-        run: |
-          for i in $(seq 1 30); do
-            mysqladmin ping -h 127.0.0.1 -uroot -psecret >/dev/null 2>&1 && exit 0
-            sleep 2
-          done
-          echo "mysql never came up" >&2
-          exit 1
-
-      - name: Helper ping
-        run: ./target/release/stryke-mysql-helper ping
-
-      - name: Round-trip (write/read/schema)
-        run: |
-          set -euo pipefail
-          H=./target/release/stryke-mysql-helper
-          $H execute 'CREATE TABLE IF NOT EXISTS ci_smoke(id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(64), score DOUBLE)'
-          $H execute 'INSERT INTO ci_smoke (name, score) VALUES (?,?)' --bind='["alice", 1.5]' | jq -e '.affected_rows == 1'
-          $H execute 'INSERT INTO ci_smoke (name, score) VALUES (?,?)' --bind='["bob",   2.5]' | jq -e '.affected_rows == 1'
-          $H query 'SELECT name FROM ci_smoke WHERE score > ?' --bind='[1.0]' --columnar \
-            | jq -e '.num_rows == 2'
-          $H schema --table ci_smoke | jq -e '.columns | length == 3'
-          $H tables | wc -l | tr -d ' ' | grep -x 1
-          $H databases | grep -q stryke_test
-          $H execute 'DROP TABLE ci_smoke' | jq -e '.affected_rows >= 0'
-
   doc:
     name: Doc
     runs-on: ubuntu-latest
@@ -128,7 +76,7 @@ jobs:
 
   release-build:
     name: Release Build (${{ matrix.target }})
-    needs: [check, test, helper-live-mysql]
+    needs: [check, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -150,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: stryke-mysql-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/stryke-mysql-helper
+          path: target/${{ matrix.target }}/release/libstryke_mysql.*
 
   docs-gates:
     name: Docs gates

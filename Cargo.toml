@@ -2,7 +2,7 @@
 name = "stryke-mysql"
 version = "0.2.0"
 edition = "2021"
-description = "MySQL / MariaDB cdylib for the stryke `mysql` package — dlopened in-process via stryke's FFI bridge, with a persistent mysql::Pool per connection URL."
+description = "MySQL / MariaDB cdylib for the stryke `mysql` package — dlopened in-process via stryke's FFI bridge, with a persistent mysql::Pool per connection URL"
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-mysql"

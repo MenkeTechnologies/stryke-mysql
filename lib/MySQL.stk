@@ -13,6 +13,7 @@ package MySQL
 
 # ── error dispatch ────────────────────────────────────────────────────
 
+## Decode the cdylib's JSON return; die on `{error}` payload.
 fn MySQL::_decode ($name, $json) {
     my $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
@@ -21,6 +22,7 @@ fn MySQL::_decode ($name, $json) {
     $o
 }
 
+## Build the FFI request hash by merging the caller's connection opts.
 fn MySQL::_req ($extra, $opts) {
     my %r = %$extra
     for my $k (qw(url host port user password database)) {
@@ -34,15 +36,18 @@ fn MySQL::_req ($extra, $opts) {
 
 # ── version + ping ──────────────────────────────────────────────────
 
+## Return the package version string.
 fn MySQL::version {
     MySQL::_decode("pkg_version", mysql__pkg_version("{}"))->{version}
 }
 
+## Return the server / remote version reported live.
 fn MySQL::server_version (%opts) {
     MySQL::_decode("version",
         mysql__version(to_json(MySQL::_req({}, \%opts))))->{version}
 }
 
+## Connectivity probe — returns 1 on success, 0 on failure.
 fn MySQL::ping (%opts) {
     MySQL::_decode("ping",
         mysql__ping(to_json(MySQL::_req({}, \%opts))))->{ok} ? 1 : 0
@@ -50,18 +55,21 @@ fn MySQL::ping (%opts) {
 
 # ── metadata ────────────────────────────────────────────────────────
 
+## SHOW DATABASES — array of database names.
 fn MySQL::databases (%opts) {
     my $o = MySQL::_decode("databases",
         mysql__databases(to_json(MySQL::_req({}, \%opts))))
     @{ $o->{databases} }
 }
 
+## SHOW TABLES — array of table names.
 fn MySQL::tables (%opts) {
     my $o = MySQL::_decode("tables",
         mysql__tables(to_json(MySQL::_req({}, \%opts))))
     @{ $o->{tables} }
 }
 
+## DESCRIBE $table — column rows.
 fn MySQL::schema ($table, %opts) {
     MySQL::_decode("schema",
         mysql__schema(to_json(MySQL::_req({ table => $table }, \%opts))))
@@ -69,21 +77,25 @@ fn MySQL::schema ($table, %opts) {
 
 # ── read paths ──────────────────────────────────────────────────────
 
+## Run a SELECT and return rows as hashrefs.
 fn MySQL::query ($sql, %opts) {
     MySQL::_query_impl($sql, \%opts)
 }
 
+## Internal query implementation; see public wrappers.
 fn MySQL::_query_impl ($sql, $o) {
     my $r = MySQL::_req({ sql => $sql, params => $o->{bind} }, $o)
     my $res = MySQL::_decode("query", mysql__query(to_json($r)))
     @{ $res->{rows} }
 }
 
+## Run a SELECT LIMIT 1; return one row hashref or undef.
 fn MySQL::query_one ($sql, %opts) {
     my @r = MySQL::_query_impl($sql, \%opts)
     @r ? $r[0] : undef
 }
 
+## Run a SELECT; return the first column as a flat list.
 fn MySQL::query_col ($sql, %opts) {
     my @rows = MySQL::_query_impl($sql, \%opts)
     return () unless @rows
@@ -92,6 +104,7 @@ fn MySQL::query_col ($sql, %opts) {
     map { $_->{$first} } @rows
 }
 
+## Run a SELECT LIMIT 1; return the first cell.
 fn MySQL::query_scalar ($sql, %opts) {
     my @r = MySQL::_query_impl($sql, \%opts)
     return undef unless @r
@@ -112,6 +125,7 @@ fn MySQL::query_stream ($sql, %opts) {
     $n
 }
 
+## SELECT * FROM $table [LIMIT N] shorthand.
 fn MySQL::dump ($table, %opts) {
     my $r = MySQL::_req({ table => $table, limit => $opts{limit} }, \%opts)
     my $res = MySQL::_decode("dump", mysql__dump(to_json($r)))
@@ -120,11 +134,13 @@ fn MySQL::dump ($table, %opts) {
 
 # ── DDL / DML ───────────────────────────────────────────────────────
 
+## Run a non-SELECT statement (DDL/DML); returns { affected, last_insert_id }.
 fn MySQL::execute ($sql, %opts) {
     my $r = MySQL::_req({ sql => $sql, params => $opts{bind} }, \%opts)
     MySQL::_decode("execute", mysql__execute(to_json($r)))
 }
 
+## Read SQL from $path and run as a multi-statement script.
 fn MySQL::exec_file ($path, %opts) {
     die "MySQL::exec_file: file `$path` not found" unless -e $path
     open my $fh, "<", $path or die "MySQL::exec_file: open $path: $!"
@@ -135,6 +151,7 @@ fn MySQL::exec_file ($path, %opts) {
     MySQL::_decode("exec", mysql__exec(to_json($r)))
 }
 
+## Bulk INSERT $rows (arrayref of hashrefs) into $table.
 fn MySQL::insert_many ($table, $rows, %opts) {
     die "MySQL::insert_many: rows must be arrayref of hashrefs" unless ref($rows) eq "ARRAY"
     my $r = MySQL::_req({ table => $table, rows => $rows }, \%opts)

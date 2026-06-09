@@ -6,8 +6,8 @@
 
 use MySQL
 
-my $have_cdylib = eval { MySQL::version(); 1 }
-my $dsn = $ENV{MYSQL_URL} // $ENV{MYSQL_DSN}
+val $have_cdylib = eval { MySQL::version(); 1 }
+val $dsn = $ENV{MYSQL_URL} // $ENV{MYSQL_DSN}
 
 unless ($have_cdylib) {
     p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
@@ -22,12 +22,12 @@ unless (eval { MySQL::ping(url => $dsn) }) {
     exit 0
 }
 
-my $tbl = "stryke_mysql_test_$$"
+val $tbl = "stryke_mysql_test_$$"
 p "1..10"
-my $i = 0
+var $i = 0
 
 eval { MySQL::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
-my $r
+var $r
 eval {
     $r = MySQL::execute(
         "CREATE TABLE $tbl (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(64), score DOUBLE)",
@@ -49,7 +49,7 @@ p $@ ? "not ok $i - insert: $@" :
        ($r->{affected_rows} == 3 ? "ok $i - insert 3 rows" :
         "not ok $i - insert affected=$r->{affected_rows}")
 
-my @rows
+var @rows
 eval { @rows = MySQL::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - select: $@" :
@@ -63,13 +63,13 @@ p $@ ? "not ok $i - bind query: $@" :
             ? "ok $i - bind query"
             : "not ok $i - bind query wrong shape")
 
-my $scalar
+var $scalar
 eval { $scalar = MySQL::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - query_scalar: $@" :
        ($scalar == 3 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $scalar")
 
-my $one
+var $one
 eval { $one = MySQL::query_one("SELECT * FROM $tbl WHERE name = ?", dsn => $dsn, bind => ["alice"]) }
 $i++
 p $@ ? "not ok $i - query_one: $@" :
@@ -77,7 +77,7 @@ p $@ ? "not ok $i - query_one: $@" :
             ? "ok $i - query_one"
             : "not ok $i - query_one wrong")
 
-my @col
+var @col
 eval { @col = MySQL::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - query_col: $@" :
@@ -85,7 +85,7 @@ p $@ ? "not ok $i - query_col: $@" :
             ? "ok $i - query_col"
             : "not ok $i - query_col wrong")
 
-my $sch
+var $sch
 eval { $sch = MySQL::schema($tbl, dsn => $dsn) }
 $i++
 p $@ ? "not ok $i - schema: $@" :
@@ -93,21 +93,21 @@ p $@ ? "not ok $i - schema: $@" :
             ? "ok $i - schema"
             : "not ok $i - schema bad shape")
 
-my @tables
+var @tables
 eval { @tables = MySQL::tables(dsn => $dsn) }
 $i++
 if ($@) {
     p "not ok $i - tables: $@"
 } else {
-    my $found = 0
-    for my $t (@tables) {
+    var $found = 0
+    for val $t (@tables) {
         $found = 1 if $t eq $tbl
     }
     p ($found ? "ok $i - tables (found $tbl)"
               : "not ok $i - tables missing $tbl (out of " . len(@tables) . ")")
 }
 
-my $r2
+var $r2
 eval {
     $r2 = MySQL::insert_many($tbl,
         [{ name => "dana", score => 4.0 },

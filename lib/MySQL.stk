@@ -15,7 +15,7 @@ package MySQL
 
 ## Decode the cdylib's JSON return; die on `{error}` payload.
 fn MySQL::_decode ($name, $json) {
-    my $o = from_json $json
+    val $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
         die "MySQL::$name: $o->{error}"
     }
@@ -24,8 +24,8 @@ fn MySQL::_decode ($name, $json) {
 
 ## Build the FFI request hash by merging the caller's connection opts.
 fn MySQL::_req ($extra, $opts) {
-    my %r = %$extra
-    for my $k (qw(url host port user password database)) {
+    var %r = %$extra
+    for val $k (qw(url host port user password database)) {
         $r{$k} = $opts->{$k} if exists $opts->{$k} && defined $opts->{$k}
     }
     if (!exists $r{url} && !exists $r{host} && defined $ENV{MYSQL_URL}) {
@@ -57,14 +57,14 @@ fn MySQL::ping (%opts) {
 
 ## SHOW DATABASES — array of database names.
 fn MySQL::databases (%opts) {
-    my $o = MySQL::_decode("databases",
+    val $o = MySQL::_decode("databases",
         mysql__databases(to_json(MySQL::_req({}, \%opts))))
     @{ $o->{databases} }
 }
 
 ## SHOW TABLES — array of table names.
 fn MySQL::tables (%opts) {
-    my $o = MySQL::_decode("tables",
+    val $o = MySQL::_decode("tables",
         mysql__tables(to_json(MySQL::_req({}, \%opts))))
     @{ $o->{tables} }
 }
@@ -84,41 +84,41 @@ fn MySQL::query ($sql, %opts) {
 
 ## Internal query implementation; see public wrappers.
 fn MySQL::_query_impl ($sql, $o) {
-    my $r = MySQL::_req({ sql => $sql, params => $o->{bind} }, $o)
-    my $res = MySQL::_decode("query", mysql__query(to_json($r)))
+    val $r = MySQL::_req({ sql => $sql, params => $o->{bind} }, $o)
+    val $res = MySQL::_decode("query", mysql__query(to_json($r)))
     @{ $res->{rows} }
 }
 
 ## Run a SELECT LIMIT 1; return one row hashref or undef.
 fn MySQL::query_one ($sql, %opts) {
-    my @r = MySQL::_query_impl($sql, \%opts)
+    val @r = MySQL::_query_impl($sql, \%opts)
     @r ? $r[0] : undef
 }
 
 ## Run a SELECT; return the first column as a flat list.
 fn MySQL::query_col ($sql, %opts) {
-    my @rows = MySQL::_query_impl($sql, \%opts)
+    val @rows = MySQL::_query_impl($sql, \%opts)
     return () unless @rows
-    my @keys = keys %{ $rows[0] }
-    my $first = $keys[0]
+    val @keys = keys %{ $rows[0] }
+    val $first = $keys[0]
     map { $_->{$first} } @rows
 }
 
 ## Run a SELECT LIMIT 1; return the first cell.
 fn MySQL::query_scalar ($sql, %opts) {
-    my @r = MySQL::_query_impl($sql, \%opts)
+    val @r = MySQL::_query_impl($sql, \%opts)
     return undef unless @r
-    my @keys = keys %{ $r[0] }
+    val @keys = keys %{ $r[0] }
     $r[0]->{$keys[0]}
 }
 
 ## Callback fires per row; cdylib returns all rows in one call.
 fn MySQL::query_stream ($sql, %opts) {
     die "MySQL::query_stream: callback => sub { … } required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @rows = MySQL::_query_impl($sql, \%opts)
-    my $n = 0
-    for my $row (@rows) {
+    val $cb = $opts{callback}
+    val @rows = MySQL::_query_impl($sql, \%opts)
+    var $n = 0
+    for val $row (@rows) {
         $cb->($row)
         $n++
     }
@@ -127,8 +127,8 @@ fn MySQL::query_stream ($sql, %opts) {
 
 ## SELECT * FROM $table [LIMIT N] shorthand.
 fn MySQL::dump ($table, %opts) {
-    my $r = MySQL::_req({ table => $table, limit => $opts{limit} }, \%opts)
-    my $res = MySQL::_decode("dump", mysql__dump(to_json($r)))
+    val $r = MySQL::_req({ table => $table, limit => $opts{limit} }, \%opts)
+    val $res = MySQL::_decode("dump", mysql__dump(to_json($r)))
     @{ $res->{rows} }
 }
 
@@ -136,25 +136,25 @@ fn MySQL::dump ($table, %opts) {
 
 ## Run a non-SELECT statement (DDL/DML); returns { affected, last_insert_id }.
 fn MySQL::execute ($sql, %opts) {
-    my $r = MySQL::_req({ sql => $sql, params => $opts{bind} }, \%opts)
+    val $r = MySQL::_req({ sql => $sql, params => $opts{bind} }, \%opts)
     MySQL::_decode("execute", mysql__execute(to_json($r)))
 }
 
 ## Read SQL from $path and run as a multi-statement script.
 fn MySQL::exec_file ($path, %opts) {
     die "MySQL::exec_file: file `$path` not found" unless -e $path
-    open my $fh, "<", $path or die "MySQL::exec_file: open $path: $!"
+    open val $fh, "<", $path or die "MySQL::exec_file: open $path: $!"
     local $/
-    my $sql = <$fh>
+    val $sql = <$fh>
     close $fh
-    my $r = MySQL::_req({ sql => $sql }, \%opts)
+    val $r = MySQL::_req({ sql => $sql }, \%opts)
     MySQL::_decode("exec", mysql__exec(to_json($r)))
 }
 
 ## Bulk INSERT $rows (arrayref of hashrefs) into $table.
 fn MySQL::insert_many ($table, $rows, %opts) {
     die "MySQL::insert_many: rows must be arrayref of hashrefs" unless ref($rows) eq "ARRAY"
-    my $r = MySQL::_req({ table => $table, rows => $rows }, \%opts)
+    val $r = MySQL::_req({ table => $table, rows => $rows }, \%opts)
     MySQL::_decode("insert_many", mysql__insert_many(to_json($r)))->{inserted}
 }
 

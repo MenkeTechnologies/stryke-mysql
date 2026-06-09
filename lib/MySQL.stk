@@ -158,4 +158,3 @@ fn MySQL::insert_many ($table, $rows, %opts) {
     MySQL::_decode("insert_many", mysql__insert_many(to_json($r)))->{inserted}
 }
 
-1

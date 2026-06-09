@@ -1,5 +1,5 @@
 [package]
-name = "mysql"
+name = "stryke-mysql"
 version = "0.2.0"
 description = "MySQL / MariaDB client for stryke. cdylib loaded in-process — persistent mysql::Pool per connection URL across calls."
 authors = ["MenkeTechnologies"]

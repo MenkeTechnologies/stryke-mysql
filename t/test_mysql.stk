@@ -1,122 +1,80 @@
-# t/test_mysql.stk — round-trip tests against a live MySQL.
-#
-# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
-# from the package root so stryke's FFI bridge dlopens
-# lib/libstryke_mysql.{dylib,so} on `use MySQL`.
+## t/test_mysql.stk — assertion tests for the stryke `MySQL` package.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`).
+## Requires the cdylib to be loaded — install once with `s pkg install -g .`
+## so stryke's FFI bridge dlopens `lib/libstryke_mysql.{dylib,so}` on
+## `use MySQL`. Live tests use a unique table `stryke_mysql_test_$$` when
+## $MYSQL_URL (or $MYSQL_DSN) points at a reachable server.
 
 use MySQL
 
-val $have_cdylib = eval { MySQL::version(); 1 }
+# ── permission-free: cdylib reachable ───────────────────────────────
+val $version = MySQL::version()
+assert_ok $version, "MySQL::version returns truthy (cdylib loaded)"
+
+# ── liveness probe ──────────────────────────────────────────────────
 val $dsn = $ENV{MYSQL_URL} // $ENV{MYSQL_DSN}
+val $alive = defined $dsn && $dsn ne "" && eval { MySQL::ping(url => $dsn) }
 
-unless ($have_cdylib) {
-    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
-    exit 0
-}
-unless (defined $dsn && $dsn ne "") {
-    p "1..0 # SKIP \$MYSQL_URL not set"
-    exit 0
-}
-unless (eval { MySQL::ping(url => $dsn) }) {
-    p "1..0 # SKIP cannot connect to $dsn"
-    exit 0
-}
+if ($alive) {
+    val $tbl = "stryke_mysql_test_$$"
+    eval { MySQL::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
 
-val $tbl = "stryke_mysql_test_$$"
-p "1..10"
-var $i = 0
-
-eval { MySQL::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn) }
-var $r
-eval {
-    $r = MySQL::execute(
+    # create table
+    MySQL::execute(
         "CREATE TABLE $tbl (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(64), score DOUBLE)",
         dsn => $dsn,
     )
-}
-$i++
-p $@ ? "not ok $i - create table: $@" : "ok $i - create table"
+    assert_ok 1, "create table"
 
-eval {
-    $r = MySQL::execute(
+    # bulk insert with positional binds
+    val $ins = MySQL::execute(
         "INSERT INTO $tbl (name, score) VALUES (?, ?), (?, ?), (?, ?)",
         dsn  => $dsn,
         bind => ["alice", 1.5, "bob", 2.0, "charlie", 3.25],
     )
-}
-$i++
-p $@ ? "not ok $i - insert: $@" :
-       ($r->{affected_rows} == 3 ? "ok $i - insert 3 rows" :
-        "not ok $i - insert affected=$r->{affected_rows}")
+    assert_eq $ins->{affected_rows}, 3, "insert: affected_rows=3"
 
-var @rows
-eval { @rows = MySQL::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - select: $@" :
-       (len(@rows) == 3 ? "ok $i - select 3 rows" :
-        "not ok $i - select got " . len(@rows) . " rows")
+    # select all
+    val @rows = MySQL::query("SELECT * FROM $tbl ORDER BY id", dsn => $dsn)
+    assert_eq scalar(@rows), 3, "select all: 3 rows"
 
-eval { @rows = MySQL::query("SELECT * FROM $tbl WHERE name = ?", dsn => $dsn, bind => ["bob"]) }
-$i++
-p $@ ? "not ok $i - bind query: $@" :
-       (len(@rows) == 1 && $rows[0]->{name} eq "bob"
-            ? "ok $i - bind query"
-            : "not ok $i - bind query wrong shape")
+    # bind in query
+    val @bobs = MySQL::query("SELECT * FROM $tbl WHERE name = ?", dsn => $dsn, bind => ["bob"])
+    assert_eq scalar(@bobs), 1, "bind query: 1 row"
+    assert_eq $bobs[0]->{name}, "bob", "bind query: name=bob"
 
-var $scalar
-eval { $scalar = MySQL::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - query_scalar: $@" :
-       ($scalar == 3 ? "ok $i - query_scalar" : "not ok $i - query_scalar got $scalar")
+    # query_scalar
+    assert_eq MySQL::query_scalar("SELECT COUNT(*) AS n FROM $tbl", dsn => $dsn), 3, "query_scalar count"
 
-var $one
-eval { $one = MySQL::query_one("SELECT * FROM $tbl WHERE name = ?", dsn => $dsn, bind => ["alice"]) }
-$i++
-p $@ ? "not ok $i - query_one: $@" :
-       (defined $one && $one->{name} eq "alice"
-            ? "ok $i - query_one"
-            : "not ok $i - query_one wrong")
+    # query_one
+    val $one = MySQL::query_one("SELECT * FROM $tbl WHERE name = ?", dsn => $dsn, bind => ["alice"])
+    assert_eq $one->{name}, "alice", "query_one: name=alice"
 
-var @col
-eval { @col = MySQL::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - query_col: $@" :
-       (len(@col) == 3 && $col[0] eq "alice"
-            ? "ok $i - query_col"
-            : "not ok $i - query_col wrong")
+    # query_col
+    val @names = MySQL::query_col("SELECT name FROM $tbl ORDER BY id", dsn => $dsn)
+    assert_eq scalar(@names), 3, "query_col: 3 names"
+    assert_eq $names[0], "alice", "query_col: first=alice"
 
-var $sch
-eval { $sch = MySQL::schema($tbl, dsn => $dsn) }
-$i++
-p $@ ? "not ok $i - schema: $@" :
-       (ref($sch->{columns}) eq "ARRAY" && len(@{$sch->{columns}}) == 3
-            ? "ok $i - schema"
-            : "not ok $i - schema bad shape")
+    # schema
+    val $sch = MySQL::schema($tbl, dsn => $dsn)
+    assert_eq ref($sch->{columns}), "ARRAY", "schema: columns is array"
+    assert_eq scalar(@{$sch->{columns}}), 3, "schema: 3 columns"
 
-var @tables
-eval { @tables = MySQL::tables(dsn => $dsn) }
-$i++
-if ($@) {
-    p "not ok $i - tables: $@"
-} else {
-    var $found = 0
-    for val $t (@tables) {
-        $found = 1 if $t eq $tbl
-    }
-    p ($found ? "ok $i - tables (found $tbl)"
-              : "not ok $i - tables missing $tbl (out of " . len(@tables) . ")")
-}
+    # tables list contains ours
+    val @tables = MySQL::tables(dsn => $dsn)
+    val $found = grep { $_ eq $tbl } @tables
+    assert_ok $found, "tables: contains $tbl"
 
-var $r2
-eval {
-    $r2 = MySQL::insert_many($tbl,
+    # insert_many
+    val $im = MySQL::insert_many($tbl,
         [{ name => "dana", score => 4.0 },
          { name => "eve",  score => 5.5 }],
         dsn => $dsn,
     )
-}
-$i++
-p $@ ? "not ok $i - insert_many: $@" :
-       ($r2->{affected_rows} == 2 ? "ok $i - insert_many" : "not ok $i - insert_many wrong count")
+    assert_eq $im->{affected_rows}, 2, "insert_many: affected_rows=2"
 
-eval { MySQL::execute("DROP TABLE $tbl", dsn => $dsn) }
+    eval { MySQL::execute("DROP TABLE $tbl", dsn => $dsn) }
+}
+
+test_run

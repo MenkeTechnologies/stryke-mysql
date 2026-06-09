@@ -394,3 +394,195 @@ pub extern "C" fn mysql__insert_many(args: *const c_char) -> *const c_char {
 pub extern "C" fn mysql__dump(args: *const c_char) -> *const c_char {
     ffi_call(args, op_dump)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(f: F) {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var("MYSQL_URL").ok();
+        std::env::remove_var("MYSQL_URL");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match saved {
+            Some(s) => std::env::set_var("MYSQL_URL", s),
+            None => std::env::remove_var("MYSQL_URL"),
+        }
+        if let Err(p) = result {
+            std::panic::resume_unwind(p);
+        }
+    }
+
+    // ── url_from_opts ──
+
+    #[test]
+    fn url_opts_url_wins_over_env() {
+        with_env(|| {
+            std::env::set_var("MYSQL_URL", "mysql://env@h/db");
+            assert_eq!(
+                url_from_opts(&json!({"url": "mysql://opts@h/db"})),
+                "mysql://opts@h/db"
+            );
+        });
+    }
+
+    #[test]
+    fn url_falls_back_to_env() {
+        with_env(|| {
+            std::env::set_var("MYSQL_URL", "mysql://env@host/db");
+            assert_eq!(url_from_opts(&json!({})), "mysql://env@host/db");
+        });
+    }
+
+    #[test]
+    fn url_default_when_unset() {
+        with_env(|| {
+            assert_eq!(url_from_opts(&json!({})), "mysql://root@127.0.0.1:3306/");
+        });
+    }
+
+    #[test]
+    fn url_built_from_host_port_user_db() {
+        with_env(|| {
+            let opts = json!({
+                "host": "db.example.com",
+                "port": 3307,
+                "user": "ada",
+                "database": "shop",
+            });
+            assert_eq!(url_from_opts(&opts), "mysql://ada@db.example.com:3307/shop");
+        });
+    }
+
+    #[test]
+    fn url_includes_password_when_set() {
+        with_env(|| {
+            let opts = json!({"user": "ada", "password": "hunter2"});
+            // `mysql://ada:hunter2@127.0.0.1:3306/`
+            let u = url_from_opts(&opts);
+            assert!(u.contains("ada:hunter2@"), "{u}");
+        });
+    }
+
+    #[test]
+    fn url_omits_password_marker_when_blank() {
+        with_env(|| {
+            let opts = json!({"user": "ada"});
+            let u = url_from_opts(&opts);
+            assert!(u.contains("mysql://ada@"), "{u}");
+            assert!(!u.contains(":@"), "stray colon: {u}");
+        });
+    }
+
+    // ── json_to_my_value ──
+
+    #[test]
+    fn j2mv_null() {
+        assert!(matches!(json_to_my_value(&Value::Null), MyValue::NULL));
+    }
+
+    #[test]
+    fn j2mv_bool_maps_to_int_01() {
+        match json_to_my_value(&json!(true)) {
+            MyValue::Int(1) => {}
+            other => panic!("expected Int(1), got {other:?}"),
+        }
+        match json_to_my_value(&json!(false)) {
+            MyValue::Int(0) => {}
+            other => panic!("expected Int(0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn j2mv_signed_int() {
+        match json_to_my_value(&json!(-7)) {
+            MyValue::Int(-7) => {}
+            other => panic!("expected Int(-7), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn j2mv_float() {
+        match json_to_my_value(&json!(1.5)) {
+            MyValue::Float(f) if (f - 1.5).abs() < 1e-6 => {}
+            other => panic!("expected Float(1.5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn j2mv_string_to_bytes() {
+        match json_to_my_value(&json!("hi")) {
+            MyValue::Bytes(b) => assert_eq!(b, b"hi"),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn j2mv_array_serializes_as_json_bytes() {
+        match json_to_my_value(&json!([1, 2])) {
+            MyValue::Bytes(b) => assert_eq!(std::str::from_utf8(&b).unwrap(), "[1,2]"),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    // ── my_value_to_json ──
+
+    #[test]
+    fn mv2j_null() {
+        assert_eq!(my_value_to_json(&MyValue::NULL), Value::Null);
+    }
+
+    #[test]
+    fn mv2j_bytes_utf8_string() {
+        let v = my_value_to_json(&MyValue::Bytes(b"hello".to_vec()));
+        assert_eq!(v, json!("hello"));
+    }
+
+    #[test]
+    fn mv2j_bytes_non_utf8_falls_back_to_marker() {
+        let v = my_value_to_json(&MyValue::Bytes(vec![0xFF, 0xFE, 0xFD]));
+        assert_eq!(v, json!("<binary 3 bytes>"));
+    }
+
+    #[test]
+    fn mv2j_int_and_float() {
+        assert_eq!(my_value_to_json(&MyValue::Int(42)), json!(42));
+        assert_eq!(my_value_to_json(&MyValue::UInt(99)), json!(99));
+        assert_eq!(my_value_to_json(&MyValue::Double(1.25)), json!(1.25));
+    }
+
+    #[test]
+    fn mv2j_date_format_zero_padded() {
+        let v = my_value_to_json(&MyValue::Date(2026, 6, 9, 14, 30, 5, 0));
+        assert_eq!(v, json!("2026-06-09 14:30:05"));
+    }
+
+    #[test]
+    fn mv2j_time_negative_prefix() {
+        let v = my_value_to_json(&MyValue::Time(true, 1, 2, 3, 4, 0));
+        assert_eq!(v, json!("-1d 02:03:04"));
+        let v = my_value_to_json(&MyValue::Time(false, 0, 1, 2, 3, 0));
+        assert_eq!(v, json!("0d 01:02:03"));
+    }
+
+    // ── params_from_value ──
+
+    #[test]
+    fn params_array_yields_positional() {
+        let p = params_from_value(&json!([1, "two", null]));
+        assert!(matches!(p, Params::Positional(_)));
+        if let Params::Positional(v) = p {
+            assert_eq!(v.len(), 3);
+        }
+    }
+
+    #[test]
+    fn params_non_array_yields_empty() {
+        assert!(matches!(params_from_value(&json!({"a": 1})), Params::Empty));
+        assert!(matches!(params_from_value(&Value::Null), Params::Empty));
+        assert!(matches!(params_from_value(&json!("scalar")), Params::Empty));
+    }
+}

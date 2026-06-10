@@ -17,7 +17,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use mysql::prelude::*;
 use mysql::{Params, Pool, Row, Value as MyValue};
 use once_cell::sync::OnceCell;
@@ -167,10 +167,12 @@ fn op_tables(opts: Value) -> Result<Value> {
 fn op_schema(opts: Value) -> Result<Value> {
     let p = get_pool(&opts)?;
     let mut conn = p.get_conn()?;
-    let table = opts["table"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing table"))?
-        .to_string();
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
     let stmt = conn.prep(format!("DESCRIBE {}", table))?;
     let names = vec![
         "Field".to_string(),
@@ -229,23 +231,109 @@ fn op_exec(opts: Value) -> Result<Value> {
     let p = get_pool(&opts)?;
     let mut conn = p.get_conn()?;
     let sql = opts["sql"].as_str().ok_or_else(|| anyhow!("missing sql"))?;
-    // Split on `;` at the end of lines — naive but sufficient for the
-    // multi-statement use case the v1 helper supported. mysql crate
-    // doesn't expose a multi-statement exec without `multi-statements`
-    // mode set on the URL.
-    for stmt in sql.split(';').filter(|s| !s.trim().is_empty()) {
-        conn.query_drop(stmt)?;
+    // Pre-fix this used `sql.split(';')` which broke SQL with embedded
+    // semicolons inside string literals or comments. A statement like
+    // `INSERT INTO t (msg) VALUES ('hello; world')` was split into
+    // `INSERT INTO t (msg) VALUES ('hello` (parse error) and
+    // ` world')` (orphan parens). The splitter below respects single
+    // quotes, double quotes, backticks, line comments, and block comments.
+    for stmt in split_sql_statements(sql) {
+        let trimmed = stmt.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        conn.query_drop(trimmed)?;
     }
     Ok(json!({"ok": true}))
+}
+
+/// SQL-aware statement splitter. Respects single-quoted strings (with `''`
+/// escape), double-quoted strings (`""`), backtick identifiers, line
+/// comments (`-- … \n` and `# … \n`), and block comments (`/* … */`).
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\'' | b'"' | b'`' => {
+                let quote = b;
+                cur.push(b as char);
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    cur.push(c as char);
+                    i += 1;
+                    if c == quote {
+                        // SQL standard: doubled quote = escaped, continue.
+                        if i < bytes.len() && bytes[i] == quote {
+                            cur.push(quote as char);
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    // Backslash-escape only for non-backtick quotes; mysql also
+                    // recognizes `\\` and `\'` inside strings.
+                    if quote != b'`' && c == b'\\' && i < bytes.len() {
+                        cur.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                // Line comment to end of line.
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    cur.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    cur.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                cur.push_str("/*");
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    cur.push(bytes[i] as char);
+                    i += 1;
+                }
+                if i + 1 < bytes.len() {
+                    cur.push_str("*/");
+                    i += 2;
+                }
+            }
+            b';' => {
+                out.push(cur.clone());
+                cur.clear();
+                i += 1;
+            }
+            _ => {
+                cur.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn op_insert_many(opts: Value) -> Result<Value> {
     let p = get_pool(&opts)?;
     let mut conn = p.get_conn()?;
-    let table = opts["table"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing table"))?
-        .to_string();
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
     let rows = opts["rows"]
         .as_array()
         .ok_or_else(|| anyhow!("missing rows (array of objects)"))?;
@@ -255,7 +343,10 @@ fn op_insert_many(opts: Value) -> Result<Value> {
     let first = rows[0]
         .as_object()
         .ok_or_else(|| anyhow!("first row must be an object"))?;
-    let cols: Vec<&str> = first.keys().map(|s| s.as_str()).collect();
+    let cols: Vec<String> = first
+        .keys()
+        .map(|s| validate_identifier(s, "column"))
+        .collect::<Result<_>>()?;
     let col_list = cols.join(", ");
     let placeholders = vec!["?"; cols.len()].join(", ");
     let sql = format!(
@@ -268,11 +359,50 @@ fn op_insert_many(opts: Value) -> Result<Value> {
         let obj = row
             .as_object()
             .ok_or_else(|| anyhow!("row must be an object"))?;
-        let vals: Vec<MyValue> = cols.iter().map(|c| json_to_my_value(&obj[*c])).collect();
+        // Pre-fix indexed via `obj[*c]` which returns &Value::Null for missing
+        // keys — silently binding NULL when a row was missing a column. Use
+        // explicit `get()` so a missing column hard-errors instead, surfacing
+        // the row-shape mismatch to the caller.
+        let vals: Vec<MyValue> = cols
+            .iter()
+            .map(|c| {
+                obj.get(c).map(json_to_my_value).ok_or_else(|| {
+                    anyhow!("row missing column `{c}` (must match first row's keys)")
+                })
+            })
+            .collect::<Result<_>>()?;
         conn.exec_drop(&stmt, Params::Positional(vals))?;
         total += conn.affected_rows() as i64;
     }
     Ok(json!({"inserted": total}))
+}
+
+/// Validate a MySQL identifier (table or column name) for safe `format!`
+/// interpolation into SQL. Pre-fix `op_schema` raw-interpolated `table` into
+/// `DESCRIBE {}` enabling SQL injection. Whitelist: ASCII letters/digits/
+/// underscore/dollar, with optional schema-qualified `schema.table` form.
+fn validate_identifier(name: &str, what: &str) -> Result<String> {
+    if name.is_empty() {
+        bail!("`{what}` must not be empty");
+    }
+    let valid_start = |c: char| c.is_ascii_alphabetic() || c == '_';
+    let valid_rest = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    for (i, part) in name.split('.').enumerate() {
+        if part.is_empty() {
+            bail!("`{what}` has empty segment (position {i}) in `{name}`");
+        }
+        let mut chars = part.chars();
+        let first = chars.next().expect("non-empty");
+        if !valid_start(first) {
+            bail!("`{what}` segment `{part}` must start with letter or underscore");
+        }
+        for c in chars {
+            if !valid_rest(c) {
+                bail!("`{what}` segment `{part}` contains invalid character `{c}`");
+            }
+        }
+    }
+    Ok(name.to_string())
 }
 
 fn op_dump(opts: Value) -> Result<Value> {
@@ -717,5 +847,120 @@ mod tests {
                 "out-of-u16-range port must currently pass through unvalidated, got {u_huge}",
             );
         });
+    }
+
+    // `row_to_json` (lib.rs:121-128) builds the per-row JSON object by
+    // repeated `Map::insert(name, value)`. When two columns in the same
+    // result set share a name — which happens naturally with `SELECT *
+    // FROM a JOIN b USING (id)` (both `a.id` and `b.id` are reported as
+    // `id`), or `SELECT a.name, b.name FROM ...` without aliases — the
+    // second insert overwrites the first. The first column's value is
+    // silently dropped, NOT surfaced as an error or disambiguated.
+    //
+    // This is a real data-loss class: stryke callers who do `SELECT t1.x,
+    // t2.x FROM ...` see only one `x`. Pin so a future fix (suffix
+    // disambiguation, error, array-valued duplicate) is a deliberate
+    // behavior change. The check counts keys in the produced object — it
+    // must be 1, not 2, to prove the silent overwrite happens.
+    #[test]
+    fn row_to_json_duplicate_column_names_silently_overwrite() {
+        // Can't easily build a real `mysql::Row` without the crate's
+        // private constructors, so we go through `Map::insert` directly
+        // — that's the exact code at lib.rs:125. The test pins the
+        // semantic contract (overwrite-on-duplicate), not the wiring.
+        let mut obj = Map::new();
+        let names = ["id", "id"];
+        let vals = [MyValue::Int(1), MyValue::Int(2)];
+        for (n, v) in names.iter().zip(vals.iter()) {
+            obj.insert((*n).to_string(), my_value_to_json(v));
+        }
+        assert_eq!(
+            obj.len(),
+            1,
+            "duplicate `id` columns must collapse to one entry; if this is now 2, \
+             row_to_json was changed to disambiguate — confirm intentional",
+        );
+        assert_eq!(
+            obj.get("id"),
+            Some(&json!(2)),
+            "second value must win (last-insert-wins on Map); got {obj:?}",
+        );
+    }
+
+    // `params_from_value` (lib.rs:130-135) handles ONLY two shapes:
+    // JSON array → `Params::Positional`, everything else → `Params::Empty`.
+    // A JSON OBJECT (`{"name": "ada"}`) hits the `None` arm of `as_array`
+    // and returns `Params::Empty` — completely silently. The MySQL crate
+    // supports `Params::Named` for `:name` placeholders, but stryke
+    // callers passing `params => {name: "ada"}` against `SELECT * FROM u
+    // WHERE name = :name` get a prepared statement executed with ZERO
+    // bind values — which either errors at the DB layer with a confusing
+    // "wrong number of parameters" or, worse, executes with NULL/no
+    // filter and returns the wrong rows.
+    //
+    // The existing `params_non_array_yields_empty` test (lib.rs:583) is
+    // a smoke test that lumps object/null/scalar together. This test
+    // separates out the object case specifically because it's the only
+    // one where the caller has a coherent intent that's being silently
+    // discarded. If `params_from_value` is updated to convert
+    // `Value::Object` to `Params::Named`, this test flips deliberately.
+    #[test]
+    fn params_object_silently_drops_named_bindings() {
+        let p = params_from_value(&json!({"name": "ada", "id": 7}));
+        match p {
+            Params::Empty => {} // current behavior: silently dropped
+            Params::Named(_) => panic!(
+                "named params now supported — update this pin and confirm \
+                 lib.rs:130-135 mapped Value::Object to Params::Named",
+            ),
+            other => panic!(
+                "unexpected Params variant for object input: {other:?}; \
+                 lib.rs:130-135 was changed in a way that needs review",
+            ),
+        }
+    }
+
+    // `my_value_to_json` (lib.rs:106-109) formats `MyValue::Date` with
+    // `{:04}-{:02}-{:02} {:02}:{:02}:{:02}` and zero range validation.
+    // MySQL's "zero date" (`0000-00-00 00:00:00`) is a real value
+    // returned for columns with `NOT NULL DEFAULT '0000-00-00'` in
+    // strict-mode-off servers — every legacy MySQL has them. The current
+    // code formats this as the literal string `"0000-00-00 00:00:00"`,
+    // which:
+    //   (a) cannot round-trip through chrono::NaiveDateTime (chrono
+    //       rejects year 0 / month 0 / day 0),
+    //   (b) is indistinguishable from a real January-of-year-0 value if
+    //       one ever showed up,
+    //   (c) is the canonical MySQL gotcha that every ORM has to handle
+    //       explicitly (sqlx returns Option<NaiveDateTime> and gives
+    //       None for zero-date; diesel errors; this crate just passes
+    //       the malformed string through).
+    //
+    // Pin the current pass-through format so a future fix (map zero-date
+    // to JSON null, or to a sentinel string) shows up as a behavior
+    // change. Also pin out-of-range month/day to confirm there's NO
+    // validation — important for the stryke caller who needs to know
+    // they're getting raw DB bytes, not validated dates.
+    #[test]
+    fn mv2j_zero_date_passes_through_as_literal_string() {
+        let v = my_value_to_json(&MyValue::Date(0, 0, 0, 0, 0, 0, 0));
+        assert_eq!(
+            v,
+            json!("0000-00-00 00:00:00"),
+            "zero-date must currently pass through as a literal string; \
+             if this is now null/error, lib.rs:106-109 added validation — confirm",
+        );
+    }
+
+    #[test]
+    fn mv2j_out_of_range_date_fields_pass_through_unvalidated() {
+        // Month 13, day 32, hour 25, minute 99 — all impossible.
+        let v = my_value_to_json(&MyValue::Date(2026, 13, 32, 25, 99, 99, 0));
+        assert_eq!(
+            v,
+            json!("2026-13-32 25:99:99"),
+            "out-of-range date fields must currently pass through unvalidated; \
+             if this is now an error/null, lib.rs:106-109 added range checks — confirm",
+        );
     }
 }

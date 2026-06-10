@@ -611,4 +611,111 @@ mod tests {
         // that we don't panic and produce *some* MyValue.
         let _ = v;
     }
+
+    // Silent precision loss class. JSON number `0.1` is the canonical
+    // float not exactly representable in either f32 or f64, but the f64
+    // approximation (0.1000000000000000055...) is closer to true 0.1
+    // than the f32 approximation (0.100000001490116...). The cast at
+    // lib.rs:85 (`f as f32`) throws away ~32 bits of mantissa for *every*
+    // non-integral JSON number that flows through bind params — including
+    // every DECIMAL, every monetary value, every coordinate. Pin the
+    // current lossy behavior so a future fix that switches to
+    // `MyValue::Double(f)` (the obvious 1-line correction) shows up as a
+    // deliberate behavior change. The assertion compares against the
+    // f32-rounded value, not the original f64, which is the *whole point*.
+    #[test]
+    fn j2mv_f64_zero_point_one_loses_precision_via_f32_cast() {
+        let original_f64: f64 = 0.1;
+        let lossy_f32: f32 = original_f64 as f32;
+        // Sanity: the cast actually does lose information.
+        assert_ne!(
+            lossy_f32 as f64, original_f64,
+            "test premise broken: f64 0.1 must differ from (f32)0.1 widened back",
+        );
+        match json_to_my_value(&json!(0.1_f64)) {
+            MyValue::Float(f) => {
+                assert_eq!(
+                    f.to_bits(),
+                    lossy_f32.to_bits(),
+                    "expected the truncated f32 bit pattern; if this flips, lib.rs:85 \
+                     stopped doing `f as f32` — confirm intentional",
+                );
+                assert_ne!(
+                    f as f64, original_f64,
+                    "if the round-trip is now lossless, lib.rs:85 must have switched \
+                     to MyValue::Double — update this pin",
+                );
+            }
+            other => panic!(
+                "JSON 0.1 must go through the Float (f32) arm, got {other:?} — \
+                 lib.rs:84-85 fallback ordering or variant choice changed",
+            ),
+        }
+    }
+
+    // SQL-style `/` in a password breaks URL parsing the same way `@`
+    // does (see existing `url_password_with_at_sign_is_currently_not_escaped`
+    // at lib.rs:626) but with a different fingerprint: the mysql URL
+    // parser interprets the first `/` after host as the
+    // database-name separator. So a password `p/wd` and database `shop`
+    // gets concatenated into `mysql://ada:p/wd@host:3306/shop`, which the
+    // parser sees as user=`ada`, password=`p`, host=`wd@host`, port
+    // garbage, dbname=`shop`. The existing `@` test only catches the
+    // user/host boundary class; this catches the path-separator class.
+    // If lib.rs:52-57 starts percent-encoding the password (e.g. `%2F`
+    // for `/`), this test flips deliberately and the boss can confirm
+    // the fix is intentional.
+    #[test]
+    fn url_password_with_slash_is_currently_not_escaped() {
+        with_env(|| {
+            let u = url_from_opts(&json!({
+                "host": "real-host",
+                "user": "ada",
+                "password": "p/wd",
+                "database": "shop",
+            }));
+            // Raw concat: `mysql://ada:p/wd@real-host:3306/shop`.
+            assert!(
+                u.contains("ada:p/wd@real-host"),
+                "expected raw-concat shape with embedded slash, got {u}",
+            );
+            // Fingerprint: three `/` characters instead of the expected
+            // two (`mysql://` + path) — the extra slash is the bug.
+            assert_eq!(
+                u.matches('/').count(),
+                4,
+                "two `mysql://` slashes + the bug slash + the dbname slash = 4; got {u}",
+            );
+        });
+    }
+
+    // `port` is read as `i64` (lib.rs:48) with no range check, so any
+    // signed value flows directly into `format!("...:{port}/...")`.
+    // A negative or zero port produces a syntactically-malformed-but-
+    // accepted URL (`mysql://root@127.0.0.1:0/` / `:-1/`). The mysql
+    // pool will then error at connect time with a confusing low-level
+    // message instead of at config time with `invalid port`. Pin the
+    // current "no validation" behavior so a future bounds check
+    // (`(1..=65535).contains(&port)`) is detected and the caller-facing
+    // error message can be reviewed.
+    #[test]
+    fn url_port_zero_and_negative_are_currently_accepted_verbatim() {
+        with_env(|| {
+            let u_zero = url_from_opts(&json!({"port": 0}));
+            assert!(
+                u_zero.contains(":0/"),
+                "port 0 must currently pass through unvalidated, got {u_zero}",
+            );
+            let u_neg = url_from_opts(&json!({"port": -1}));
+            assert!(
+                u_neg.contains(":-1/"),
+                "negative port must currently pass through unvalidated, got {u_neg}",
+            );
+            let u_huge = url_from_opts(&json!({"port": 999_999}));
+            assert!(
+                u_huge.contains(":999999/"),
+                "out-of-u16-range port must currently pass through unvalidated, got {u_huge}",
+            );
+        });
+    }
 }

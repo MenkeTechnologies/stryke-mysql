@@ -1,0 +1,36 @@
+## t/test_stryke_mysql_surface.stk — wrapper-completeness pin.
+##
+## Asserts every public `fn X::Y::name` declared in lib/*.stk is
+## reachable via `use` at runtime. Uses `exists &X::Y::name` to
+## probe the symbol table without invoking the sub.
+##
+## Catches:
+##   * a wrapper sub deleted from lib/ but still referenced elsewhere
+##   * a sub-package file dropped from the install layout
+##   * `use Foo::Bar` failing to chase into lib/Bar.stk
+##   * an installed-package entry whose namespace bridge is broken
+##
+## Permission-free — no service, no creds, no live daemon. Private
+## helpers (`_` prefix) are implementation detail and are NOT
+## asserted, so refactoring internals stays free.
+
+use MySQL
+
+# ── MySQL.stk ──────────────────────────────────────────────
+assert_ok exists &MySQL::version, "MySQL::version exists"
+assert_ok exists &MySQL::server_version, "MySQL::server_version exists"
+assert_ok exists &MySQL::ping, "MySQL::ping exists"
+assert_ok exists &MySQL::databases, "MySQL::databases exists"
+assert_ok exists &MySQL::tables, "MySQL::tables exists"
+assert_ok exists &MySQL::schema, "MySQL::schema exists"
+assert_ok exists &MySQL::query, "MySQL::query exists"
+assert_ok exists &MySQL::query_one, "MySQL::query_one exists"
+assert_ok exists &MySQL::query_col, "MySQL::query_col exists"
+assert_ok exists &MySQL::query_scalar, "MySQL::query_scalar exists"
+assert_ok exists &MySQL::query_stream, "MySQL::query_stream exists"
+assert_ok exists &MySQL::dump, "MySQL::dump exists"
+assert_ok exists &MySQL::execute, "MySQL::execute exists"
+assert_ok exists &MySQL::exec_file, "MySQL::exec_file exists"
+assert_ok exists &MySQL::insert_many, "MySQL::insert_many exists"
+
+test_run

@@ -585,4 +585,30 @@ mod tests {
         assert!(matches!(params_from_value(&Value::Null), Params::Empty));
         assert!(matches!(params_from_value(&json!("scalar")), Params::Empty));
     }
+
+    /// Empty array yields a `Positional(vec![])`, NOT `Empty` —
+    /// distinguishes "supplied empty" from "not supplied". A query like
+    /// `SELECT 1` with `params => []` should send 0 bind values without
+    /// erroring; pin so a refactor that coerces empty→Empty (which would
+    /// hide the explicit-but-empty contract) gets caught.
+    #[test]
+    fn params_empty_array_is_positional_not_empty() {
+        let p = params_from_value(&json!([]));
+        assert!(matches!(p, Params::Positional(_)));
+        if let Params::Positional(v) = p {
+            assert_eq!(v.len(), 0);
+        }
+    }
+
+    /// JSON numbers that overflow i64 must fall back to f64 (or string),
+    /// NOT panic. MySQL accepts BIGINT UNSIGNED up to 2^64-1, but serde
+    /// caps at i64 — we need a graceful coercion path.
+    #[test]
+    fn j2mv_overflowing_number_does_not_panic() {
+        let huge = json!(u64::MAX); // i64::MAX < x < u64::MAX
+        let v = json_to_my_value(&huge);
+        // Concrete shape can vary across serde_json versions; just pin
+        // that we don't panic and produce *some* MyValue.
+        let _ = v;
+    }
 }

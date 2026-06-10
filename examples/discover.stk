@@ -1,0 +1,32 @@
+#!/usr/bin/env stryke
+# examples/discover.stk — minimum-viable tour of the `MySQL` package.
+#
+# Runs end-to-end in CI: missing $MYSQL_URL is non-fatal, the read-only
+# block (databases + tables) skips, and the summary still prints. With
+# a real server up, the discovery ops have zero side effects.
+#
+# Run:   s examples/discover.stk
+#        MYSQL_URL=mysql://user:pw@localhost/db s examples/discover.stk
+
+use MySQL
+
+p "=== MySQL discover ==="
+p "MYSQL_URL: " . ($ENV{MYSQL_URL} // "(default localhost:3306)")
+p ""
+
+val $dbs = eval { [MySQL::databases()] }
+
+if (defined $dbs && !$@) {
+    p "service: reachable — listing read-only metadata"
+    p "  databases: " . scalar(@$dbs) . " (" . join(", ", @$dbs[0..3], (scalar(@$dbs) > 4 ? "...) " : ")"))
+    val @tbls = eval { MySQL::tables() }
+    p "  tables:    " . scalar(@tbls) . " in current db"
+} else {
+    p "service: not reachable — skipping live ops"
+    p ""
+    p "expected call shape when live:"
+    p "  val @dbs   = MySQL::databases()"
+    p "  val @tbls  = MySQL::tables()"
+    p "  val \$schema = MySQL::schema(\$table)"
+    p "  val @rows  = MySQL::query(\"SELECT * FROM users LIMIT 5\")"
+}

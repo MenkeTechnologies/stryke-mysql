@@ -6,7 +6,10 @@
 use MySQL
 
 val $dsn = $ENV{MYSQL_DSN}
-die "set \$MYSQL_DSN\n" unless defined $dsn
+unless (defined $dsn) {
+    p "set \$MYSQL_DSN to a mysql connection URL to exercise the demo"
+    exit 0
+}
 
 p "tables: " . join(", ", MySQL::tables(dsn => $dsn))
 

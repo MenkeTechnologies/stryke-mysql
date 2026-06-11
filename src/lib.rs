@@ -82,7 +82,10 @@ fn json_to_my_value(v: &Value) -> MyValue {
             } else if let Some(u) = n.as_u64() {
                 MyValue::UInt(u)
             } else if let Some(f) = n.as_f64() {
-                MyValue::Float(f as f32)
+                // Bind as f64 (mysql DOUBLE) — the old `f as f32` cast threw
+                // away ~29 mantissa bits from every DECIMAL/monetary/coordinate
+                // value.
+                MyValue::Double(f)
             } else {
                 MyValue::Bytes(n.to_string().into_bytes())
             }
@@ -253,23 +256,30 @@ fn op_exec(opts: Value) -> Result<Value> {
 fn split_sql_statements(sql: &str) -> Vec<String> {
     let bytes = sql.as_bytes();
     let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
+    // Accumulate raw bytes, not `b as char` — the latter reinterprets every
+    // UTF-8 continuation byte as a Latin-1 codepoint, corrupting non-ASCII
+    // string literals/identifiers/comments. Statement boundaries are all
+    // ASCII (`;`, quotes, `/*`), so each emitted segment is whole UTF-8.
+    let mut cur: Vec<u8> = Vec::new();
+    let flush = |cur: &mut Vec<u8>, out: &mut Vec<String>| {
+        out.push(String::from_utf8_lossy(cur).into_owned());
+    };
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         match b {
             b'\'' | b'"' | b'`' => {
                 let quote = b;
-                cur.push(b as char);
+                cur.push(b);
                 i += 1;
                 while i < bytes.len() {
                     let c = bytes[i];
-                    cur.push(c as char);
+                    cur.push(c);
                     i += 1;
                     if c == quote {
                         // SQL standard: doubled quote = escaped, continue.
                         if i < bytes.len() && bytes[i] == quote {
-                            cur.push(quote as char);
+                            cur.push(quote);
                             i += 1;
                             continue;
                         }
@@ -278,7 +288,7 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
                     // Backslash-escape only for non-backtick quotes; mysql also
                     // recognizes `\\` and `\'` inside strings.
                     if quote != b'`' && c == b'\\' && i < bytes.len() {
-                        cur.push(bytes[i] as char);
+                        cur.push(bytes[i]);
                         i += 1;
                     }
                 }
@@ -286,41 +296,41 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
             b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
                 // Line comment to end of line.
                 while i < bytes.len() && bytes[i] != b'\n' {
-                    cur.push(bytes[i] as char);
+                    cur.push(bytes[i]);
                     i += 1;
                 }
             }
             b'#' => {
                 while i < bytes.len() && bytes[i] != b'\n' {
-                    cur.push(bytes[i] as char);
+                    cur.push(bytes[i]);
                     i += 1;
                 }
             }
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                cur.push_str("/*");
+                cur.extend_from_slice(b"/*");
                 i += 2;
                 while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    cur.push(bytes[i] as char);
+                    cur.push(bytes[i]);
                     i += 1;
                 }
                 if i + 1 < bytes.len() {
-                    cur.push_str("*/");
+                    cur.extend_from_slice(b"*/");
                     i += 2;
                 }
             }
             b';' => {
-                out.push(cur.clone());
+                flush(&mut cur, &mut out);
                 cur.clear();
                 i += 1;
             }
             _ => {
-                cur.push(b as char);
+                cur.push(b);
                 i += 1;
             }
         }
     }
     if !cur.is_empty() {
-        out.push(cur);
+        flush(&mut cur, &mut out);
     }
     out
 }
@@ -408,10 +418,12 @@ fn validate_identifier(name: &str, what: &str) -> Result<String> {
 fn op_dump(opts: Value) -> Result<Value> {
     let p = get_pool(&opts)?;
     let mut conn = p.get_conn()?;
-    let table = opts["table"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing table"))?
-        .to_string();
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
     let limit = opts["limit"].as_i64();
     let sql = match limit {
         Some(n) => format!("SELECT * FROM {} LIMIT {}", table, n),
@@ -637,8 +649,8 @@ mod tests {
     #[test]
     fn j2mv_float() {
         match json_to_my_value(&json!(1.5)) {
-            MyValue::Float(f) if (f - 1.5).abs() < 1e-6 => {}
-            other => panic!("expected Float(1.5), got {other:?}"),
+            MyValue::Double(f) if (f - 1.5).abs() < 1e-9 => {}
+            other => panic!("expected Double(1.5), got {other:?}"),
         }
     }
 
@@ -742,45 +754,42 @@ mod tests {
         let _ = v;
     }
 
-    // Silent precision loss class. JSON number `0.1` is the canonical
-    // float not exactly representable in either f32 or f64, but the f64
-    // approximation (0.1000000000000000055...) is closer to true 0.1
-    // than the f32 approximation (0.100000001490116...). The cast at
-    // lib.rs:85 (`f as f32`) throws away ~32 bits of mantissa for *every*
-    // non-integral JSON number that flows through bind params — including
-    // every DECIMAL, every monetary value, every coordinate. Pin the
-    // current lossy behavior so a future fix that switches to
-    // `MyValue::Double(f)` (the obvious 1-line correction) shows up as a
-    // deliberate behavior change. The assertion compares against the
-    // f32-rounded value, not the original f64, which is the *whole point*.
+    // Precision is preserved: a non-integral JSON number binds as f64
+    // (mysql DOUBLE), not the old lossy `f as f32`. `0.1` is the canonical
+    // non-representable float; the f64 approximation must survive the bind
+    // round-trip bit-for-bit, so DECIMAL/monetary/coordinate values are not
+    // silently truncated. A regression back to `f as f32` flips this.
     #[test]
-    fn j2mv_f64_zero_point_one_loses_precision_via_f32_cast() {
+    fn j2mv_f64_binds_as_double_without_f32_truncation() {
         let original_f64: f64 = 0.1;
-        let lossy_f32: f32 = original_f64 as f32;
-        // Sanity: the cast actually does lose information.
-        assert_ne!(
-            lossy_f32 as f64, original_f64,
-            "test premise broken: f64 0.1 must differ from (f32)0.1 widened back",
-        );
+        let lossy_f32_bits = (original_f64 as f32) as f64;
         match json_to_my_value(&json!(0.1_f64)) {
-            MyValue::Float(f) => {
+            MyValue::Double(f) => {
                 assert_eq!(
-                    f.to_bits(),
-                    lossy_f32.to_bits(),
-                    "expected the truncated f32 bit pattern; if this flips, lib.rs:85 \
-                     stopped doing `f as f32` — confirm intentional",
+                    f, original_f64,
+                    "JSON 0.1 must bind as the exact f64, not a truncated value",
                 );
                 assert_ne!(
-                    f as f64, original_f64,
-                    "if the round-trip is now lossless, lib.rs:85 must have switched \
-                     to MyValue::Double — update this pin",
+                    f, lossy_f32_bits,
+                    "the bound value must NOT match the f32-rounded 0.1 — that \
+                     would mean the old `f as f32` cast is back",
                 );
             }
-            other => panic!(
-                "JSON 0.1 must go through the Float (f32) arm, got {other:?} — \
-                 lib.rs:84-85 fallback ordering or variant choice changed",
-            ),
+            other => panic!("JSON 0.1 must go through the Double (f64) arm, got {other:?}",),
         }
+    }
+
+    // UTF-8 fidelity: split_sql_statements must not corrupt multibyte text.
+    // The old `b as char` accumulation reinterpreted each continuation byte
+    // as Latin-1, so `'café'` came back as `'cafÃ©'`. Pin byte-exact survival
+    // of a non-ASCII string literal through the splitter.
+    #[test]
+    fn split_sql_preserves_utf8_string_literals() {
+        let got = split_sql_statements("SELECT 'café'; SELECT 'naïve'");
+        assert_eq!(
+            got,
+            vec!["SELECT 'café'".to_string(), " SELECT 'naïve'".to_string()]
+        );
     }
 
     // SQL-style `/` in a password breaks URL parsing the same way `@`

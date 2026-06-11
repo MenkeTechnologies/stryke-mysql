@@ -963,4 +963,131 @@ mod tests {
              if this is now an error/null, lib.rs:106-109 added range checks — confirm",
         );
     }
+
+    // ── split_sql_statements ──
+
+    // The whole reason split_sql_statements exists (lib.rs:234-248 comment) is
+    // that a naive `sql.split(';')` mangles a semicolon inside a string literal.
+    // This is the regression test for the exact example quoted in that comment:
+    // `VALUES ('hello; world')` must stay ONE statement, not split at the
+    // embedded `;`. If the splitter ever loses single-quote tracking, this
+    // collapses back to the pre-fix two-fragment breakage.
+    #[test]
+    fn split_semicolon_inside_single_quote_stays_one_statement() {
+        let got = split_sql_statements("INSERT INTO t (msg) VALUES ('hello; world')");
+        assert_eq!(
+            got,
+            vec!["INSERT INTO t (msg) VALUES ('hello; world')".to_string()],
+            "embedded `;` inside a quoted literal must not split the statement",
+        );
+    }
+
+    // Doubled-quote SQL escaping (`''` = one literal quote, not string-close)
+    // is handled at lib.rs:271-275. A literal `'a;b'` written as `'''a;b'''`
+    // (quote-escaped) must keep the inner `;` protected AND the whole thing as
+    // one statement. Off-by-one in the doubled-quote skip would either re-enter
+    // string mode (eat the rest of the input) or exit early (expose the `;`).
+    // This pins the escape interplay with the splitter together.
+    #[test]
+    fn split_doubled_quote_escape_keeps_semicolon_protected() {
+        let got = split_sql_statements("SELECT '''a;b'''");
+        assert_eq!(
+            got,
+            vec!["SELECT '''a;b'''".to_string()],
+            "doubled-quote escaped literal containing `;` must remain one statement",
+        );
+    }
+
+    // Block comments (`/* … */`, lib.rs:299-310) must swallow an embedded `;`.
+    // The terminator scan is `i + 1 < bytes.len()` guarded, an off-by-one prone
+    // loop: if the closing `*/` lands at the very end of input it must still be
+    // consumed. This input puts `;` inside the comment AND a real `;` after it,
+    // so a broken comment-skip reveals itself as the wrong split count.
+    #[test]
+    fn split_block_comment_hides_semicolon_real_one_still_splits() {
+        let got = split_sql_statements("A /* x; y */ B; C");
+        assert_eq!(
+            got,
+            vec!["A /* x; y */ B".to_string(), " C".to_string()],
+            "`;` inside /* */ must not split; the `;` after the comment must",
+        );
+    }
+
+    // Trailing `;` (lib.rs:311-315 pushes+clears `cur`, then lib.rs:322 only
+    // pushes a NON-empty trailing `cur`) must NOT emit a spurious empty final
+    // statement. op_exec (lib.rs:240-246) trims+skips empties so this is
+    // belt-and-suspenders, but the off-by-one "do we append the empty tail?"
+    // is exactly the kind of thing a refactor breaks. Pin: one statement, not
+    // `["A", ""]`.
+    #[test]
+    fn split_trailing_semicolon_yields_no_empty_tail() {
+        assert_eq!(
+            split_sql_statements("SELECT 1;"),
+            vec!["SELECT 1".to_string()],
+            "trailing `;` must not produce a phantom empty final statement",
+        );
+        // And empty input is the empty vec, not `[""]`.
+        assert!(
+            split_sql_statements("").is_empty(),
+            "empty SQL must yield zero statements",
+        );
+    }
+
+    // ── validate_identifier ──
+
+    // validate_identifier (lib.rs:384-406) is the SQL-injection guard for the
+    // raw `format!`-interpolated identifiers in op_schema / op_dump /
+    // op_insert_many. The whole point is to REJECT anything that could break
+    // out of an identifier position. These are the adversarial payloads that
+    // MUST be refused; if any starts passing, the injection door is reopened.
+    #[test]
+    fn validate_identifier_rejects_injection_payloads() {
+        for bad in [
+            "users; DROP TABLE x", // statement break
+            "a b",                 // space
+            "a-b",                 // dash (not in whitelist)
+            "tbl`",                // backtick break-out
+            "tbl'",                // quote
+            "tbl)",                // paren
+            "tbl ",                // trailing space
+            " tbl",                // leading space
+            "1col",                // digit start (valid_rest but not valid_start)
+            "$col",                // `$` allowed in rest, NOT as first char
+            "",                    // empty
+            ".",                   // empty segments both sides
+            "db.",                 // empty trailing segment
+            ".tbl",                // empty leading segment
+            "a..b",                // empty middle segment
+            "naïve",               // non-ASCII (chars()-based, must reject)
+        ] {
+            assert!(
+                validate_identifier(bad, "table").is_err(),
+                "must reject injection/invalid identifier {bad:?}",
+            );
+        }
+    }
+
+    // Conversely, the legitimate identifier shapes the connector depends on
+    // MUST pass unchanged: bare names, underscores, mid-name digits, the `$`
+    // char (legal in MySQL identifiers), and the schema-qualified `db.table`
+    // form that op_schema/op_dump accept. A too-strict tightening that broke
+    // `schema.table` would silently make every cross-schema DESCRIBE fail; pin
+    // it. Returned string must equal the input verbatim (no normalization).
+    #[test]
+    fn validate_identifier_accepts_legal_forms_verbatim() {
+        for good in [
+            "users",
+            "_tmp",
+            "col1",
+            "wsrep$status",
+            "shop.orders",
+            "_a.b1",
+        ] {
+            assert_eq!(
+                validate_identifier(good, "table").ok().as_deref(),
+                Some(good),
+                "legal identifier {good:?} must pass through unchanged",
+            );
+        }
+    }
 }

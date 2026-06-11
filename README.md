@@ -30,7 +30,7 @@ core binary so the daily-driver install stays slim.
 - [\[0x02\] Quick start](#0x02-quick-start)
 - [\[0x03\] CLI: `mysql`](#0x03-cli-mysql)
 - [\[0x04\] API reference](#0x04-api-reference)
-- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x05\] FFI layer](#0x05-ffi-layer)
 - [\[0x06\] Type encoding](#0x06-type-encoding)
 - [\[0x07\] Tests](#0x07-tests)
 - [\[0x08\] Dev workflow](#0x08-dev-workflow)
@@ -46,9 +46,9 @@ big native dependency (`mysql` + TLS stack + Tokio for async variants). Most
 stryke one-liners don't touch a database; for the ones that do, opt in with
 this package.
 
-`stryke-mysql` ships as a thin stryke library plus a Rust helper binary
-(`stryke-mysql-helper`) built from this repo. The stryke side spawns the
-helper per call and parses NDJSON over a pipe.
+`stryke-mysql` ships as a thin stryke library plus a Rust cdylib
+(`libstryke_mysql.{dylib,so}`) built from this repo and dlopened
+in-process on first `use MySQL` — no fork-per-call, no pipe parsing.
 
 ## [0x01] Install
 
@@ -81,8 +81,8 @@ no fresh TCP+auth handshake.
 ```stryke
 use MySQL
 
-# Set $MYSQL_DSN once, omit the named arg everywhere.
-$ENV{MYSQL_DSN} = "mysql://root:secret@127.0.0.1:3306/test"
+# Set $MYSQL_URL once, omit the named arg everywhere.
+$ENV{MYSQL_URL} = "mysql://root:secret@127.0.0.1:3306/test"
 
 # Single-row scalar.
 p MySQL::query_scalar "SELECT COUNT(*) FROM users"
@@ -92,14 +92,14 @@ my @rows = MySQL::query "SELECT id, name FROM users WHERE created_at > ?",
                         bind => ["2025-01-01"]
 @rows |> ep
 
-# Streaming variant — no full-result buffering.
+# Callback-per-row variant (cdylib returns all rows in one call).
 MySQL::query_stream "SELECT * FROM big_table",
     callback => sub ($row) { process $row }
 
-# Write paths return { affected_rows, last_insert_id, warnings, info }.
+# Write paths return { affected, last_insert_id }.
 my $r = MySQL::execute "UPDATE users SET name = ? WHERE id = ?",
                        bind => ["alice", 42]
-p "updated $r->{affected_rows}"
+p "updated $r->{affected}"
 
 # Bulk insert (array of hashes; columns inferred from first row's keys).
 MySQL::insert_many "users",
@@ -111,11 +111,11 @@ p to_json MySQL::schema "users"
 p MySQL::tables |> ep
 ```
 
-DSN sources (priority order):
+Connection URL sources (priority order):
 
-1. `dsn => "mysql://user:pass@host:port/db"` named arg
-2. `$ENV{MYSQL_DSN}`
-3. Individual flags: `host`, `port`, `user`, `password`, `database`, `socket`
+1. `url => "mysql://user:pass@host:port/db"` named arg
+2. Individual named args: `host`, `port`, `user`, `password`, `database`
+3. `$ENV{MYSQL_URL}`
 
 ## [0x03] CLI: `mysql`
 
@@ -152,25 +152,24 @@ Connection flags (also accept env vars):
 ### Read paths
 
 ```stryke
-MySQL::query        $sql, %opts → @rows | \@rows
+MySQL::query        $sql, %opts → @rows
 MySQL::query_stream $sql, %opts → $count       # callback per row
 MySQL::query_one    $sql, %opts → \%row | undef
 MySQL::query_col    $sql, %opts → @values      # first column, all rows
 MySQL::query_scalar $sql, %opts → $value | undef
-MySQL::dump         $table, %opts → @rows
+MySQL::dump         $table, %opts → @rows      # opts: limit
 ```
 
-`%opts` keys: `dsn`, `host`, `port`, `user`, `password`, `database`, `socket`,
-`ssl`, `ssl_ca`, `connect_timeout`, `bind`, `columnar`, `with_meta`, `limit`,
-`callback` (stream only). `bind` is an arrayref (positional `?`) or hashref
-(named `:name`).
+`%opts` keys: `url`, `host`, `port`, `user`, `password`, `database`,
+`bind`, `limit` (dump only), `callback` (stream only). `bind` is an
+arrayref bound to positional `?` placeholders.
 
 ### Write paths
 
 ```stryke
-MySQL::execute     $sql, %opts → { affected_rows, last_insert_id, warnings, info }
-MySQL::exec_file   $path, %opts → [{ sql, affected_rows, ... }, ...]
-MySQL::insert_many $table, $rows_aref, %opts → { affected_rows, ... }
+MySQL::execute     $sql, %opts → { affected, last_insert_id }
+MySQL::exec_file   $path, %opts → { ok }       # multi-statement script
+MySQL::insert_many $table, $rows_aref, %opts → $inserted_count
 ```
 
 ### Metadata
@@ -179,20 +178,34 @@ MySQL::insert_many $table, $rows_aref, %opts → { affected_rows, ... }
 MySQL::ping       %opts → 1 | ""
 MySQL::tables     %opts → @names
 MySQL::databases %opts → @names
-MySQL::schema     $table, %opts → { table, columns => [...], indexes => [...] }
+MySQL::schema     $table, %opts → { table, columns => [...] }
 ```
 
-### Helper plumbing
+### Plumbing
 
 ```stryke
-MySQL::helper_path()    → $abs_path
-MySQL::ensure_built()   → $abs_path     # cargo-builds if missing
-MySQL::version()        → "stryke-mysql-helper X.Y.Z"
+MySQL::version()           → $version_string   # cdylib's CARGO_PKG_VERSION
+MySQL::server_version(%opts) → $server_version # live `SELECT VERSION()`
 ```
 
-## [0x05] Helper protocol
+## [0x05] FFI layer
 
-The Rust helper speaks JSON over stdin/stdout/argv — useful directly:
+Each `MySQL::*` wrapper builds a JSON args dict and calls a sibling
+`mysql__*` symbol resolved out of `libstryke_mysql.{dylib,so}`. The
+cdylib is dlopened in-process on first `use MySQL` (via stryke's
+`pkg::commands::try_load_ffi_for` resolver hook) and exposes 11 entry
+points: `mysql__pkg_version`, `mysql__version`, `mysql__ping`,
+`mysql__databases`, `mysql__tables`, `mysql__schema`, `mysql__query`,
+`mysql__execute`, `mysql__exec`, `mysql__insert_many`, `mysql__dump`.
+
+A `mysql::Pool` cache keyed by connection URL is held in `OnceCell`,
+so back-to-back calls reuse the same connection pool.
+
+Errors come back as a `{error}` JSON payload; the stryke wrapper dies
+with `MySQL::<op>: <reason>`.
+
+<details>
+<summary>v1 wire shape (historical helper binary)</summary>
 
 ```sh
 stryke-mysql-helper --dsn 'mysql://…' query 'SELECT * FROM t WHERE id = ?' --bind '[42]'
@@ -212,21 +225,11 @@ Output:
 * `tables`, `databases` → NDJSON `{"name": ...}`
 * `ping` → `ok` on stdout, exit 0; non-zero on failure
 
-### Persistent serve mode (experimental)
+The helper also supported an experimental long-running JSON-RPC daemon
+on a Unix socket (`serve --socket-path …`). The in-process cdylib +
+pool cache replaced both modes.
 
-The helper also supports a long-running JSON-RPC daemon on a Unix socket:
-
-```sh
-stryke-mysql-helper --dsn 'mysql://…' serve --socket-path /tmp/sm.sock &
-```
-
-Wire format: one JSON request per line over the socket
-(`{"id":N,"method":"query|execute|tables|databases|schema|ping|close","params":{...}}`),
-one response per line. The connection is reused across requests.
-
-The stryke side's persistent-connect API will pick this up once stryke gains a
-Unix-socket client builtin. For now the lib is single-shot; the daemon is
-useful directly from any language with a Unix-socket client.
+</details>
 
 ## [0x06] Type encoding
 
@@ -252,11 +255,11 @@ consumers can detect and decode them.
 
 ```sh
 cargo test                                  # unit + contract tests, no live calls
-MYSQL_DSN='mysql://…' s test t/             # end-to-end against live MySQL
+MYSQL_URL='mysql://…' s test t/             # end-to-end against live MySQL
 ```
 
-The end-to-end suite skips cleanly when `$MYSQL_DSN` is unset or the helper
-isn't built.
+The end-to-end suite skips cleanly when `$MYSQL_URL` (or legacy
+`$MYSQL_DSN`) is unset or the server isn't reachable.
 
 ## [0x08] Dev workflow
 
@@ -275,18 +278,18 @@ stryke-mysql/
   stryke.toml                  # stryke package manifest
   Cargo.toml                   # Rust helper crate manifest
   Makefile                     # convenience targets
-  src/main.rs                  # stryke-mysql-helper binary
+  src/lib.rs                   # single-file cdylib
   lib/
     MySQL.stk                  # `use MySQL`
-  bin/
-    mysql.stk                  # `mysql` CLI
-    mysql-build.stk            # `mysql-build` CLI (cargo build wrapper)
   t/
-    test_mysql.stk             # end-to-end (gated on $MYSQL_DSN)
+    test_mysql.stk             # end-to-end (gated on $MYSQL_URL)
+    test_stryke_mysql_surface.stk
   examples/
     quick_query.stk
     bulk_load.stk
     dump_table.stk
+    discover.stk
+    explain.stk
   .github/workflows/
     ci.yml                     # cargo check/test on PRs
     release.yml                # cross-compile + GH release on tag push

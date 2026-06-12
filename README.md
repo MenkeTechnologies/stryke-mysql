@@ -170,7 +170,24 @@ arrayref bound to positional `?` placeholders.
 MySQL::execute     $sql, %opts → { affected, last_insert_id }
 MySQL::exec_file   $path, %opts → { ok }       # multi-statement script
 MySQL::insert_many $table, $rows_aref, %opts → $inserted_count
+MySQL::upsert      $table, $row_href, %opts → $affected   # INSERT … ON DUPLICATE KEY UPDATE
 MySQL::truncate    $table, %opts → 1           # TRUNCATE TABLE
+```
+
+`upsert` inserts a single row and, on a duplicate unique/PK key, updates
+the `update` columns from the proposed row (MySQL `VALUES(col)`). MySQL's
+`ON DUPLICATE KEY` differs from Postgres/DuckDB: it fires on **any**
+unique/PK collision (no per-target conflict clause) and there is **no
+RETURNING** (passing `returning` dies). Options: `update => \@cols`
+(defaults to every row column not named in the advisory `conflict =>
+\@cols`; an empty list is a no-op self-assignment, i.e. insert-or-ignore).
+Returns the affected-row count — MySQL reports 1 for an insert, 2 for an
+update, 0 when a duplicate left the row unchanged.
+
+```stryke
+MySQL::upsert "kv", { id => 1, name => "a", hits => 1 }              # insert or update all
+MySQL::upsert "kv", { id => 1, name => "x", hits => 9 },
+             conflict => ["id"], update => ["hits"]                  # only bump hits
 ```
 
 ### Transactions

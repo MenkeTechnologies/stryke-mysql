@@ -211,3 +211,59 @@ fn MySQL::truncate ($table, %opts) {
     MySQL::execute("TRUNCATE TABLE $table", MySQL::_conn(\%opts))
     1
 }
+
+## Validate $name as a plain SQL identifier ([A-Za-z_][A-Za-z0-9_]*); die
+## otherwise. Used where upsert interpolates names straight into SQL.
+fn MySQL::_ident ($name, $what = "identifier") {
+    unless (defined($name) && $name =~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+        die "MySQL::upsert: $what must be a plain identifier, got `$name`"
+    }
+    $name
+}
+
+## INSERT a single $row (hashref of column => value) into $table; on a
+## duplicate unique/PK key, UPDATE the `update` columns from the proposed
+## row (MySQL `VALUES(col)`). Unlike Postgres/DuckDB, MySQL's ON DUPLICATE
+## KEY fires on ANY unique/PK collision — there is no per-target conflict
+## clause and no RETURNING. Options:
+##   conflict  => \@cols   advisory only: excluded from the default update set
+##   update    => \@cols   columns to overwrite on a duplicate; defaults to
+##                         every row column not named in `conflict`. An empty
+##                         list becomes a no-op self-assignment (insert-or-ignore).
+## Column / update / conflict names are identifier-validated; values are
+## bound. Returns the affected-row count (MySQL reports 1 for an insert, 2
+## for an update, 0 when a duplicate left the row unchanged).
+fn MySQL::upsert ($table, $row, %opts) {
+    die "MySQL::upsert: row must be a hashref" unless ref($row) eq "HASH"
+    die "MySQL::upsert: RETURNING is not supported by MySQL" if defined $opts{returning}
+
+    MySQL::_ident($table, "table")
+    val @cols = sort keys %$row
+    die "MySQL::upsert: row must have at least one column" unless @cols
+    MySQL::_ident($_, "column") for @cols
+
+    var %is_conflict
+    if (ref($opts{conflict}) eq "ARRAY") {
+        MySQL::_ident($_, "conflict column") for @{ $opts{conflict} }
+        %is_conflict = map { ($_, 1) } @{ $opts{conflict} }
+    }
+
+    var @update
+    if (defined $opts{update}) {
+        die "MySQL::upsert: update must be an arrayref" unless ref($opts{update}) eq "ARRAY"
+        @update = @{ $opts{update} }
+    } else {
+        @update = grep { !$is_conflict{$_} } @cols
+    }
+    MySQL::_ident($_, "update column") for @update
+
+    val @ph  = map { "?" } @cols
+    var $sql = "INSERT INTO $table (" . join(", ", @cols) . ") VALUES (" . join(", ", @ph) . ")"
+    # MySQL has no DO NOTHING; an empty update set becomes a no-op self
+    # assignment on the first column so a duplicate is silently ignored.
+    $sql .= @update
+        ? " ON DUPLICATE KEY UPDATE " . join(", ", map { "$_ = VALUES($_)" } @update)
+        : " ON DUPLICATE KEY UPDATE $cols[0] = $cols[0]"
+    val @bind = map { $row->{$_} } @cols
+    MySQL::execute($sql, bind => \@bind, MySQL::_conn(\%opts))->{affected}
+}

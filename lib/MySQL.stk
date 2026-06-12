@@ -206,6 +206,15 @@ fn MySQL::table_exists ($name, %opts) {
         MySQL::_conn(\%opts)) > 0 ? 1 : 0
 }
 
+## True if at least one row in $table matches $where (or any row exists
+## when $where is omitted). Uses SQL EXISTS, which short-circuits at the
+## first match — cheaper than count(*) > 0 on a large table. The table name
+## and $where are interpolated; pass only trusted/validated values.
+fn MySQL::exists ($table, $where = undef, %opts) {
+    val $cond = defined($where) && length($where) ? " WHERE $where" : ""
+    MySQL::query_scalar("SELECT EXISTS(SELECT 1 FROM $table$cond) AS e", MySQL::_conn(\%opts)) ? 1 : 0
+}
+
 ## TRUNCATE $table. The table name is interpolated — trusted names only.
 fn MySQL::truncate ($table, %opts) {
     MySQL::execute("TRUNCATE TABLE $table", MySQL::_conn(\%opts))

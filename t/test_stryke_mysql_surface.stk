@@ -34,6 +34,7 @@ assert_ok exists &MySQL::exec_file, "MySQL::exec_file exists"
 assert_ok exists &MySQL::insert_many, "MySQL::insert_many exists"
 assert_ok exists &MySQL::count, "MySQL::count exists"
 assert_ok exists &MySQL::table_exists, "MySQL::table_exists exists"
+assert_ok exists &MySQL::exists, "MySQL::exists exists"
 assert_ok exists &MySQL::truncate, "MySQL::truncate exists"
 assert_ok exists &MySQL::upsert, "MySQL::upsert exists"
 

@@ -218,8 +218,13 @@ MySQL::tables       %opts → @names
 MySQL::databases    %opts → @names
 MySQL::schema       $table, %opts → { table, columns => [...] }
 MySQL::count        $table, $where?, %opts → $row_count   # SELECT count(*) [WHERE $where]
+MySQL::exists       $table, $where?, %opts → 1 | 0        # SELECT EXISTS(…) — short-circuits
 MySQL::table_exists $name, %opts → 1 | 0                  # $name must be a plain identifier
 ```
+
+`exists` uses SQL `EXISTS`, which stops at the first matching row — prefer
+it over `count(…) > 0` when you only need a yes/no. The table name and
+`$where` are interpolated; pass trusted/validated values.
 
 ### Plumbing
 

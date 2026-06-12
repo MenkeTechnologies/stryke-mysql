@@ -99,6 +99,12 @@ if ($alive) {
     # RETURNING is unsupported by MySQL and must be rejected
     val $rej = !eval { MySQL::upsert($kv, { id => 2 }, returning => "id", url => $dsn); 1 }
     assert_ok $rej, "upsert: rejects RETURNING (unsupported by MySQL)"
+
+    # ── exists: row-existence short-circuit ──────────────────────────
+    assert_ok  MySQL::exists($kv, undef, url => $dsn), "exists: true when the table has rows"
+    assert_ok  MySQL::exists($kv, "id = 1", url => $dsn), "exists: true for a matching WHERE"
+    assert_ok !MySQL::exists($kv, "id = 999", url => $dsn), "exists: false for a non-matching WHERE"
+
     eval { MySQL::execute("DROP TABLE $kv", url => $dsn) }
 
     eval { MySQL::execute("DROP TABLE $tbl", url => $dsn) }

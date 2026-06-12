@@ -170,15 +170,30 @@ arrayref bound to positional `?` placeholders.
 MySQL::execute     $sql, %opts → { affected, last_insert_id }
 MySQL::exec_file   $path, %opts → { ok }       # multi-statement script
 MySQL::insert_many $table, $rows_aref, %opts → $inserted_count
+MySQL::truncate    $table, %opts → 1           # TRUNCATE TABLE
+```
+
+### Transactions
+
+All statements issued with the same `%opts` run on the same cached
+backend connection, so these ride on connection affinity (no extra FFI).
+
+```stryke
+MySQL::begin       %opts → 1                    # START TRANSACTION
+MySQL::commit      %opts → 1                    # COMMIT
+MySQL::rollback    %opts → 1                    # ROLLBACK
+MySQL::transaction $code, %opts → $code_result  # START TRANSACTION; $code->(); COMMIT — or ROLLBACK + re-raise on die
 ```
 
 ### Metadata
 
 ```stryke
-MySQL::ping       %opts → 1 | ""
-MySQL::tables     %opts → @names
-MySQL::databases %opts → @names
-MySQL::schema     $table, %opts → { table, columns => [...] }
+MySQL::ping         %opts → 1 | ""
+MySQL::tables       %opts → @names
+MySQL::databases    %opts → @names
+MySQL::schema       $table, %opts → { table, columns => [...] }
+MySQL::count        $table, $where?, %opts → $row_count   # SELECT count(*) [WHERE $where]
+MySQL::table_exists $name, %opts → 1 | 0                  # $name must be a plain identifier
 ```
 
 ### Plumbing

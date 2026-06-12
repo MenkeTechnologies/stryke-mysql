@@ -158,3 +158,72 @@ fn MySQL::insert_many ($table, $rows, %opts) {
     MySQL::_decode("insert_many", mysql__insert_many(to_json($r)))->{inserted}
 }
 
+
+# ── transactions ────────────────────────────────────────────────────
+#
+# Statements issued with the same %opts run on the same cached backend
+# connection, so START TRANSACTION / your statements / COMMIT ride on
+# that affinity — no new FFI export. NB not atomic across threads
+# sharing one connection tuple; use distinct connections for concurrency.
+
+## Open a transaction (START TRANSACTION) on the connection for %opts.
+fn MySQL::begin (%opts) {
+    MySQL::execute("START TRANSACTION", %opts)
+    1
+}
+
+## Commit the open transaction on the connection for %opts.
+fn MySQL::commit (%opts) {
+    MySQL::execute("COMMIT", %opts)
+    1
+}
+
+## Roll back the open transaction on the connection for %opts.
+fn MySQL::rollback (%opts) {
+    MySQL::execute("ROLLBACK", %opts)
+    1
+}
+
+## Run $code in a transaction: START TRANSACTION, $code->(), COMMIT;
+## on die, ROLLBACK and re-raise. Returns $code's result. Pass conn
+## params in %opts and reference them via closure.
+fn MySQL::transaction ($code, %opts) {
+    die "MySQL::transaction: first arg must be a coderef" unless ref($code) eq "CODE"
+    MySQL::begin(%opts)
+    val $r = eval { $code->() }
+    if ($@) {
+        eval { MySQL::rollback(%opts) }
+        die $@
+    }
+    MySQL::commit(%opts)
+    $r
+}
+
+# ── convenience reads / DDL ─────────────────────────────────────────
+
+## Number of rows in $table (optional WHERE clause $where). The table
+## name is interpolated — pass only trusted/validated names.
+fn MySQL::count ($table, $where = undef, %opts) {
+    val $sql = defined($where) && length($where)
+        ? "SELECT count(*) AS n FROM $table WHERE $where"
+        : "SELECT count(*) AS n FROM $table"
+    MySQL::query_scalar($sql, %opts) + 0
+}
+
+## True if a table named $name exists in the current database. $name
+## must be a plain identifier ([A-Za-z_][A-Za-z0-9_]*); anything else
+## dies. The identifier check keeps the inlined literal injection-safe.
+fn MySQL::table_exists ($name, %opts) {
+    unless ($name =~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+        die "MySQL::table_exists: name must be a plain identifier, got `$name`"
+    }
+    MySQL::query_scalar(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = '$name' AND table_schema = DATABASE()",
+        %opts) > 0 ? 1 : 0
+}
+
+## TRUNCATE $table. The table name is interpolated — trusted names only.
+fn MySQL::truncate ($table, %opts) {
+    MySQL::execute("TRUNCATE TABLE $table", %opts)
+    1
+}

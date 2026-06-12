@@ -13,7 +13,7 @@ unless (defined $dsn) {
 
 p "tables: " . join(", ", MySQL::tables(url => $dsn))
 
-val @rows = MySQL::query(
+var @rows = MySQL::query(
     "SELECT user, host FROM mysql.user LIMIT 5",
     url => $dsn,
 )

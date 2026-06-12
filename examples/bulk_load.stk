@@ -24,7 +24,7 @@ val @rows = map {
 } (1:100)
 
 val $r = MySQL::insert_many($tbl, \@rows, url => $dsn)
-p "inserted #{$r->{affected_rows}} rows; last_insert_id=#{$r->{last_insert_id}}"
+p "inserted #{$r} rows"
 
 p "count: " . MySQL::query_scalar("SELECT COUNT(*) FROM $tbl", url => $dsn)
 MySQL::execute("DROP TABLE $tbl", url => $dsn)

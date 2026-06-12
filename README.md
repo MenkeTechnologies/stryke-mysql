@@ -175,14 +175,22 @@ MySQL::truncate    $table, %opts → 1           # TRUNCATE TABLE
 
 ### Transactions
 
-All statements issued with the same `%opts` run on the same cached
-backend connection, so these ride on connection affinity (no extra FFI).
+Not provided as separate `begin` / `commit` / `rollback` wrappers. The
+cdylib caches a `mysql::Pool` per URL, so back-to-back FFI calls may run
+on **different pooled connections** — a `START TRANSACTION` and a later
+`COMMIT`/`ROLLBACK` issued as separate calls do not share a session and
+give no isolation (verified: a `ROLLBACK` after a failed statement did
+not undo it). For a real multi-statement transaction, send the whole
+`BEGIN … COMMIT` block as one `MySQL::execute` (a single FFI call /
+single connection checkout) or wrap it in a stored procedure:
 
 ```stryke
-MySQL::begin       %opts → 1                    # START TRANSACTION
-MySQL::commit      %opts → 1                    # COMMIT
-MySQL::rollback    %opts → 1                    # ROLLBACK
-MySQL::transaction $code, %opts → $code_result  # START TRANSACTION; $code->(); COMMIT — or ROLLBACK + re-raise on die
+MySQL::execute "
+    START TRANSACTION;
+    UPDATE accounts SET bal = bal - 100 WHERE id = 1;
+    UPDATE accounts SET bal = bal + 100 WHERE id = 2;
+    COMMIT;
+", url => $dsn
 ```
 
 ### Metadata

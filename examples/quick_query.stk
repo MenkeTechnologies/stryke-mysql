@@ -11,11 +11,11 @@ unless (defined $dsn) {
     exit 0
 }
 
-p "tables: " . join(", ", MySQL::tables(dsn => $dsn))
+p "tables: " . join(", ", MySQL::tables(url => $dsn))
 
 val @rows = MySQL::query(
     "SELECT user, host FROM mysql.user LIMIT 5",
-    dsn => $dsn,
+    url => $dsn,
 )
 p "user@host rows:"
 for val $r (@rows) {

@@ -13,18 +13,18 @@ unless (defined $dsn) {
 
 val $tbl = "stryke_demo_$$"
 
-MySQL::execute("DROP TABLE IF EXISTS $tbl", dsn => $dsn)
+MySQL::execute("DROP TABLE IF EXISTS $tbl", url => $dsn)
 MySQL::execute(
     "CREATE TABLE $tbl (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(64), v DOUBLE)",
-    dsn => $dsn,
+    url => $dsn,
 )
 
 val @rows = map {
     { name => "row_$_", v => $_ * 1.5 }
 } (1:100)
 
-val $r = MySQL::insert_many($tbl, \@rows, dsn => $dsn)
+val $r = MySQL::insert_many($tbl, \@rows, url => $dsn)
 p "inserted #{$r->{affected_rows}} rows; last_insert_id=#{$r->{last_insert_id}}"
 
-p "count: " . MySQL::query_scalar("SELECT COUNT(*) FROM $tbl", dsn => $dsn)
-MySQL::execute("DROP TABLE $tbl", dsn => $dsn)
+p "count: " . MySQL::query_scalar("SELECT COUNT(*) FROM $tbl", url => $dsn)
+MySQL::execute("DROP TABLE $tbl", url => $dsn)

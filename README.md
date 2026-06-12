@@ -171,7 +171,20 @@ MySQL::execute     $sql, %opts → { affected, last_insert_id }
 MySQL::exec_file   $path, %opts → { ok }       # multi-statement script
 MySQL::insert_many $table, $rows_aref, %opts → $inserted_count
 MySQL::upsert      $table, $row_href, %opts → $affected   # INSERT … ON DUPLICATE KEY UPDATE
+MySQL::update      $table, $set_href, $where?, %opts → $affected   # UPDATE … SET … [WHERE]
+MySQL::delete      $table, $where?, %opts → $affected               # DELETE FROM … [WHERE]
 MySQL::truncate    $table, %opts → 1           # TRUNCATE TABLE
+```
+
+`update` and `delete` complete the CRUD surface. `update` binds the `$set`
+values (`SET col = ?, …`) and interpolates `$where`; `delete` interpolates
+`$where`. Both omit `$where` to affect every row and return the
+affected-row count. Table and SET column names are identifier-validated;
+pass trusted values in `$where` (use `execute` for a parameterized one).
+
+```stryke
+MySQL::update "users", { status => "active", seen => 1 }, "id = 42"
+MySQL::delete "sessions", "expired_at < now()"
 ```
 
 `upsert` inserts a single row and, on a duplicate unique/PK key, updates

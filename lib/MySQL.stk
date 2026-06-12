@@ -215,6 +215,33 @@ fn MySQL::exists ($table, $where = undef, %opts) {
     MySQL::query_scalar("SELECT EXISTS(SELECT 1 FROM $table$cond) AS e", MySQL::_conn(\%opts)) ? 1 : 0
 }
 
+## UPDATE $table, setting the columns in the $set hashref, optionally
+## filtered by $where (omit $where to update every row). SET values are
+## bound; $where is interpolated — pass trusted values there (for a
+## parameterized condition use `execute` directly). Table and SET column
+## names are identifier-validated. Returns the affected-row count.
+fn MySQL::update ($table, $set, $where = undef, %opts) {
+    die "MySQL::update: set must be a hashref" unless ref($set) eq "HASH"
+    MySQL::_ident($table, "table")
+    val @cols = sort keys %$set
+    die "MySQL::update: set must name at least one column" unless @cols
+    MySQL::_ident($_, "column") for @cols
+    val @assign = map { "$_ = ?" } @cols
+    val $cond = defined($where) && length($where) ? " WHERE $where" : ""
+    val $sql = "UPDATE $table SET " . join(", ", @assign) . $cond
+    val @bind = map { $set->{$_} } @cols
+    MySQL::execute($sql, MySQL::_conn(\%opts), bind => \@bind)->{affected}
+}
+
+## DELETE FROM $table, optionally filtered by $where (omit $where to delete
+## every row). $where is interpolated — pass only trusted/validated values.
+## Returns the affected-row count.
+fn MySQL::delete ($table, $where = undef, %opts) {
+    MySQL::_ident($table, "table")
+    val $cond = defined($where) && length($where) ? " WHERE $where" : ""
+    MySQL::execute("DELETE FROM $table$cond", MySQL::_conn(\%opts))->{affected}
+}
+
 ## TRUNCATE $table. The table name is interpolated — trusted names only.
 fn MySQL::truncate ($table, %opts) {
     MySQL::execute("TRUNCATE TABLE $table", MySQL::_conn(\%opts))

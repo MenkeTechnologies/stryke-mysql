@@ -105,6 +105,29 @@ if ($alive) {
     assert_ok  MySQL::exists($kv, "id = 1", url => $dsn), "exists: true for a matching WHERE"
     assert_ok !MySQL::exists($kv, "id = 999", url => $dsn), "exists: false for a non-matching WHERE"
 
+    # ── update + delete (bound SET, interpolated WHERE) ───────────────
+    val $crud = "stryke_my_crud_$$"
+    MySQL::execute("DROP TABLE IF EXISTS $crud", url => $dsn)
+    MySQL::execute("CREATE TABLE $crud (id INT, name VARCHAR(8), hits INT)", url => $dsn)
+    MySQL::insert_many($crud,
+        [{ id => 1, name => "a", hits => 1 },
+         { id => 2, name => "b", hits => 2 },
+         { id => 3, name => "c", hits => 3 }], url => $dsn)
+    assert_eq MySQL::update($crud, { name => "B", hits => 9 }, "id = 2", url => $dsn), 1,
+        "update: one matching row affected"
+    val $u = MySQL::query_one("SELECT name, hits FROM $crud WHERE id = 2", url => $dsn)
+    assert_eq $u->{name}, "B", "update: SET applied to name"
+    assert_eq $u->{hits}, 9, "update: SET applied to hits"
+    assert_eq MySQL::update($crud, { hits => 0 }, undef, url => $dsn), 3,
+        "update: no WHERE touches every row"
+    assert_eq MySQL::query_scalar("SELECT sum(hits) FROM $crud", url => $dsn), 0,
+        "update: all hits zeroed"
+    assert_eq MySQL::delete($crud, "id = 1", url => $dsn), 1, "delete: one matching row"
+    assert_eq MySQL::count($crud, undef, url => $dsn), 2, "delete: count reflects removal"
+    assert_eq MySQL::delete($crud, undef, url => $dsn), 2, "delete: no WHERE removes the rest"
+    assert_eq MySQL::count($crud, undef, url => $dsn), 0, "delete: table now empty"
+    eval { MySQL::execute("DROP TABLE $crud", url => $dsn) }
+
     eval { MySQL::execute("DROP TABLE $kv", url => $dsn) }
 
     eval { MySQL::execute("DROP TABLE $tbl", url => $dsn) }

@@ -140,6 +140,31 @@ fn MySQL::execute ($sql, %opts) {
     MySQL::_decode("execute", mysql__execute(to_json($r)))
 }
 
+## Run an arrayref of { sql, params? } statements atomically — all commit or
+## all roll back. Returns a list of per-statement { affected, last_insert_id }.
+fn MySQL::transaction ($statements, %opts) {
+    die "MySQL::transaction: statements must be arrayref" unless ref($statements) eq "ARRAY"
+    val $r = MySQL::_req({ statements => $statements }, \%opts)
+    val $res = MySQL::_decode("transaction", mysql__transaction(to_json($r)))
+    @{ $res->{statements} }
+}
+
+## Call stored procedure $proc with optional positional $args (arrayref).
+## Returns a list of result sets, each { columns, rows }.
+fn MySQL::call ($proc, %opts) {
+    val $r = MySQL::_req({ proc => $proc, args => $opts{args} }, \%opts)
+    val $res = MySQL::_decode("call", mysql__call(to_json($r)))
+    @{ $res->{result_sets} }
+}
+
+## Run a multi-statement SQL string; returns a list of result sets, each
+## { columns, rows }.
+fn MySQL::query_multi ($sql, %opts) {
+    val $r = MySQL::_req({ sql => $sql }, \%opts)
+    val $res = MySQL::_decode("query_multi", mysql__query_multi(to_json($r)))
+    @{ $res->{result_sets} }
+}
+
 ## Read SQL from $path and run as a multi-statement script.
 fn MySQL::exec_file ($path, %opts) {
     die "MySQL::exec_file: file `$path` not found" unless -e $path

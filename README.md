@@ -157,8 +157,13 @@ MySQL::query_stream $sql, %opts → $count       # callback per row
 MySQL::query_one    $sql, %opts → \%row | undef
 MySQL::query_col    $sql, %opts → @values      # first column, all rows
 MySQL::query_scalar $sql, %opts → $value | undef
+MySQL::query_multi  $sql, %opts → @result_sets # each { columns, rows }
+MySQL::call         $proc, %opts → @result_sets # CALL proc(args); opts: args => [...]
 MySQL::dump         $table, %opts → @rows      # opts: limit
 ```
+
+`call` runs a stored procedure and returns every result set it emits;
+`query_multi` does the same for a multi-statement SQL string.
 
 `%opts` keys: `url`, `host`, `port`, `user`, `password`, `database`,
 `bind`, `limit` (dump only), `callback` (stream only). `bind` is an
@@ -205,22 +210,23 @@ MySQL::upsert "kv", { id => 1, name => "x", hits => 9 },
 
 ### Transactions
 
-Not provided as separate `begin` / `commit` / `rollback` wrappers. The
-cdylib caches a `mysql::Pool` per URL, so back-to-back FFI calls may run
+```stryke
+MySQL::transaction \@statements, %opts → @results   # each { affected, last_insert_id }
+```
+
+The cdylib caches a `mysql::Pool` per URL, so back-to-back FFI calls may run
 on **different pooled connections** — a `START TRANSACTION` and a later
-`COMMIT`/`ROLLBACK` issued as separate calls do not share a session and
-give no isolation (verified: a `ROLLBACK` after a failed statement did
-not undo it). For a real multi-statement transaction, send the whole
-`BEGIN … COMMIT` block as one `MySQL::execute` (a single FFI call /
-single connection checkout) or wrap it in a stored procedure:
+`COMMIT`/`ROLLBACK` issued as separate calls would not share a session.
+`MySQL::transaction` runs the whole batch on **one** checked-out connection
+inside a real `START TRANSACTION`: every statement commits together, and any
+error rolls the batch back (the connection's `Transaction` rolls back on
+drop). Each entry is `{ sql => "...", params => [...] }`.
 
 ```stryke
-MySQL::execute "
-    START TRANSACTION;
-    UPDATE accounts SET bal = bal - 100 WHERE id = 1;
-    UPDATE accounts SET bal = bal + 100 WHERE id = 2;
-    COMMIT;
-", url => $dsn
+MySQL::transaction [
+    { sql => "UPDATE accounts SET bal = bal - 100 WHERE id = ?", params => [1] },
+    { sql => "UPDATE accounts SET bal = bal + 100 WHERE id = ?", params => [2] },
+], url => $dsn
 ```
 
 ### Metadata

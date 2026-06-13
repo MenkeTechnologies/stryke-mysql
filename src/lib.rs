@@ -19,7 +19,7 @@ use std::panic::AssertUnwindSafe;
 
 use anyhow::{anyhow, bail, Result};
 use mysql::prelude::*;
-use mysql::{Params, Pool, Row, Value as MyValue};
+use mysql::{Params, Pool, QueryResult, Row, TxOpts, Value as MyValue};
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
@@ -228,6 +228,104 @@ fn op_execute(opts: Value) -> Result<Value> {
         "affected": conn.affected_rows() as i64,
         "last_insert_id": conn.last_insert_id() as i64,
     }))
+}
+
+/// Drain every result set from a `QueryResult` into `[{columns, rows}]`.
+/// MySQL stored procedures and multi-statement queries return more than one
+/// set, so both `call` and `query_multi` reuse this.
+fn collect_result_sets<P: Protocol>(mut result: QueryResult<'_, '_, '_, P>) -> Result<Vec<Value>> {
+    let mut sets = Vec::new();
+    while let Some(mut set) = result.iter() {
+        let names: Vec<String> = set
+            .columns()
+            .as_ref()
+            .iter()
+            .map(|c| c.name_str().to_string())
+            .collect();
+        let mut rows = Vec::new();
+        for r in set.by_ref() {
+            rows.push(row_to_json(r?, &names));
+        }
+        sets.push(json!({"columns": names, "rows": rows}));
+    }
+    Ok(sets)
+}
+
+/// Run an array of `{sql, params?}` statements atomically. On any error the
+/// transaction is rolled back (MySQL `Transaction` rolls back on drop);
+/// otherwise all are committed together. Returns per-statement
+/// `{affected, last_insert_id}`.
+fn op_transaction(opts: Value) -> Result<Value> {
+    let stmts = opts["statements"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing statements (array of sql/params objects)"))?;
+    if stmts.is_empty() {
+        return Err(anyhow!("statements must be a non-empty array"));
+    }
+    // Validate every statement has a sql string before opening the transaction.
+    for s in stmts {
+        if s.get("sql").and_then(Value::as_str).is_none() {
+            return Err(anyhow!("each statement needs a `sql` string"));
+        }
+    }
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let mut tx = conn.start_transaction(TxOpts::default())?;
+    let mut results = Vec::new();
+    for s in stmts {
+        let sql = s["sql"].as_str().unwrap();
+        let params = params_from_value(&s["params"]);
+        match params {
+            Params::Empty => tx.query_drop(sql)?,
+            _ => tx.exec_drop(sql, params)?,
+        }
+        results.push(json!({
+            "affected": tx.affected_rows() as i64,
+            "last_insert_id": tx.last_insert_id().map(|v| v as i64),
+        }));
+    }
+    tx.commit()?;
+    Ok(json!({"ok": true, "statements": results}))
+}
+
+/// Call a stored procedure `proc(args...)`, collecting every result set it
+/// emits. `args` is an optional positional array.
+fn op_call(opts: Value) -> Result<Value> {
+    let proc = validate_identifier(
+        opts["proc"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing proc"))?,
+        "proc",
+    )?;
+    let args = params_from_value(&opts["args"]);
+    let placeholders = match &args {
+        Params::Positional(v) => vec!["?"; v.len()].join(", "),
+        _ => String::new(),
+    };
+    let sql = format!("CALL {}({})", proc, placeholders);
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    // query_iter (Text) and exec_iter (Binary) are distinct QueryResult types,
+    // so the generic collector runs inside each arm.
+    let sets = match args {
+        Params::Empty => collect_result_sets(conn.query_iter(sql)?)?,
+        _ => collect_result_sets(conn.exec_iter(sql, args)?)?,
+    };
+    Ok(json!({"result_sets": sets}))
+}
+
+/// Run a multi-statement SQL string, returning every result set. Requires the
+/// connection to allow multiple statements (MySQL `CLIENT_MULTI_STATEMENTS`,
+/// which the `mysql` pool enables by default).
+fn op_query_multi(opts: Value) -> Result<Value> {
+    let sql = opts["sql"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sql"))?
+        .to_string();
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let result = conn.query_iter(sql)?;
+    Ok(json!({"result_sets": collect_result_sets(result)?}))
 }
 
 fn op_exec(opts: Value) -> Result<Value> {
@@ -535,6 +633,21 @@ pub extern "C" fn mysql__insert_many(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__dump(args: *const c_char) -> *const c_char {
     ffi_call(args, op_dump)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__transaction(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_transaction)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__call(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_call)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__query_multi(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_query_multi)
 }
 
 #[cfg(test)]
@@ -1098,5 +1211,49 @@ mod tests {
                 "legal identifier {good:?} must pass through unchanged",
             );
         }
+    }
+
+    // ── new-surface validation (rejects before opening a connection) ─────────
+
+    #[test]
+    fn transaction_requires_nonempty_valid_statements() {
+        with_env(|| {
+            assert!(op_transaction(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing statements"));
+            assert!(op_transaction(json!({"statements": []}))
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty"));
+            // A statement without a sql string is rejected before any connect.
+            assert!(op_transaction(json!({"statements": [{"params": [1]}]}))
+                .unwrap_err()
+                .to_string()
+                .contains("`sql` string"));
+        });
+    }
+
+    #[test]
+    fn call_requires_valid_proc_identifier() {
+        with_env(|| {
+            assert!(op_call(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing proc"));
+            // An injection-shaped proc name must be rejected by the identifier
+            // validator before it reaches the CALL string.
+            assert!(op_call(json!({"proc": "p; DROP TABLE x"})).is_err());
+        });
+    }
+
+    #[test]
+    fn query_multi_requires_sql() {
+        with_env(|| {
+            assert!(op_query_multi(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing sql"));
+        });
     }
 }

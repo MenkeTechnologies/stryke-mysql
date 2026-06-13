@@ -22,6 +22,9 @@ exports = [
     "mysql__exec",
     "mysql__insert_many",
     "mysql__dump",
+    "mysql__transaction",
+    "mysql__call",
+    "mysql__query_multi",
 ]
 
 [scripts]

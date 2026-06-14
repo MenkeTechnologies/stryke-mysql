@@ -367,3 +367,39 @@ fn MySQL::users (%opts) {
 fn MySQL::db_size (%opts) {
     MySQL::_decode("db_size", mysql__db_size(to_json(MySQL::_req({}, \%opts))))->{bytes}
 }
+
+# ── observability / admin ────────────────────────────────────────────
+
+## SHOW FULL PROCESSLIST — running threads/connections.
+fn MySQL::processlist (%opts) {
+    @{ MySQL::_decode("processlist", mysql__processlist(to_json(MySQL::_req({}, \%opts))))->{processes} }
+}
+
+## Server status counters ({ Variable_name, Value }). opt `global => 0` for session.
+fn MySQL::status (%opts) {
+    val $r = MySQL::_req({ global => (exists $opts{global} ? ($opts{global} ? \1 : \0) : \1) }, \%opts)
+    @{ MySQL::_decode("status", mysql__status(to_json($r)))->{status} }
+}
+
+## Server variables ({ Variable_name, Value }). opt `global => 0` for session.
+fn MySQL::variables (%opts) {
+    val $r = MySQL::_req({ global => (exists $opts{global} ? ($opts{global} ? \1 : \0) : \1) }, \%opts)
+    @{ MySQL::_decode("variables", mysql__variables(to_json($r)))->{variables} }
+}
+
+## SHOW ENGINES — storage engines and their support level.
+fn MySQL::engines (%opts) {
+    @{ MySQL::_decode("engines", mysql__engines(to_json(MySQL::_req({}, \%opts))))->{engines} }
+}
+
+## Size of $table as { table, data_bytes, index_bytes, bytes }.
+fn MySQL::table_size ($table, %opts) {
+    val $r = MySQL::_req({ table => $table }, \%opts)
+    MySQL::_decode("table_size", mysql__table_size(to_json($r)))
+}
+
+## KILL a connection by thread $id. Returns { id, killed }.
+fn MySQL::kill ($id, %opts) {
+    val $r = MySQL::_req({ id => $id }, \%opts)
+    MySQL::_decode("kill", mysql__kill(to_json($r)))
+}

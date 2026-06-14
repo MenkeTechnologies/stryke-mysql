@@ -52,4 +52,11 @@ assert_ok exists &MySQL::triggers, "MySQL::triggers exists"
 assert_ok exists &MySQL::users, "MySQL::users exists"
 assert_ok exists &MySQL::db_size, "MySQL::db_size exists"
 
+assert_ok exists &MySQL::processlist, "MySQL::processlist exists"
+assert_ok exists &MySQL::status, "MySQL::status exists"
+assert_ok exists &MySQL::variables, "MySQL::variables exists"
+assert_ok exists &MySQL::engines, "MySQL::engines exists"
+assert_ok exists &MySQL::table_size, "MySQL::table_size exists"
+assert_ok exists &MySQL::kill, "MySQL::kill exists"
+
 test_run

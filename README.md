@@ -246,6 +246,12 @@ MySQL::triggers     %opts → @rows                         # SHOW TRIGGERS
 MySQL::users        %opts → @{ {user, host} }            # from mysql.user (needs privilege)
 MySQL::explain      $sql, %opts → @plan_rows              # opt: params
 MySQL::db_size      %opts → $bytes                        # data + index length of current db
+MySQL::table_size   $table, %opts → { table, data_bytes, index_bytes, bytes }
+MySQL::processlist  %opts → @rows                         # SHOW FULL PROCESSLIST
+MySQL::status       %opts → @{ {Variable_name, Value} }  # SHOW GLOBAL STATUS; opt global => 0
+MySQL::variables    %opts → @{ {Variable_name, Value} }  # SHOW GLOBAL VARIABLES; opt global => 0
+MySQL::engines      %opts → @rows                         # SHOW ENGINES
+MySQL::kill         $id, %opts → { id, killed }           # KILL a thread
 ```
 
 `exists` uses SQL `EXISTS`, which stops at the first matching row — prefer

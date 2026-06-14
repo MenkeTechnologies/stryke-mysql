@@ -638,6 +638,81 @@ fn op_db_size(opts: Value) -> Result<Value> {
     Ok(json!({"bytes": bytes.unwrap_or(0)}))
 }
 
+fn op_processlist(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(&mut conn, "SHOW FULL PROCESSLIST")?;
+    Ok(json!({"processes": rows}))
+}
+
+fn op_status(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let global = opts["global"].as_bool().unwrap_or(true);
+    let (_, rows) = rows_of(
+        &mut conn,
+        if global {
+            "SHOW GLOBAL STATUS"
+        } else {
+            "SHOW SESSION STATUS"
+        },
+    )?;
+    Ok(json!({"status": rows}))
+}
+
+fn op_variables(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let global = opts["global"].as_bool().unwrap_or(true);
+    let (_, rows) = rows_of(
+        &mut conn,
+        if global {
+            "SHOW GLOBAL VARIABLES"
+        } else {
+            "SHOW SESSION VARIABLES"
+        },
+    )?;
+    Ok(json!({"variables": rows}))
+}
+
+fn op_engines(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(&mut conn, "SHOW ENGINES")?;
+    Ok(json!({"engines": rows}))
+}
+
+fn op_table_size(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
+    let row: Option<(i64, i64)> = conn.exec_first(
+        "SELECT COALESCE(data_length, 0), COALESCE(index_length, 0) \
+         FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+        (&table,),
+    )?;
+    let (data, index) = row.unwrap_or((0, 0));
+    Ok(json!({"table": table, "data_bytes": data, "index_bytes": index, "bytes": data + index}))
+}
+
+fn op_kill(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let id = opts["id"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("missing id (connection id)"))?;
+    // KILL doesn't take a placeholder; the id is validated as an integer above.
+    conn.query_drop(format!("KILL {}", id))?;
+    Ok(json!({"id": id, "killed": true}))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -783,6 +858,36 @@ pub extern "C" fn mysql__users(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__db_size(args: *const c_char) -> *const c_char {
     ffi_call(args, op_db_size)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__processlist(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_processlist)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__status(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_status)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__variables(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_variables)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__engines(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_engines)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__table_size(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_table_size)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__kill(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_kill)
 }
 
 #[cfg(test)]

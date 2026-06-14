@@ -32,6 +32,12 @@ exports = [
     "mysql__triggers",
     "mysql__users",
     "mysql__db_size",
+    "mysql__processlist",
+    "mysql__status",
+    "mysql__variables",
+    "mysql__engines",
+    "mysql__table_size",
+    "mysql__kill",
 ]
 
 [scripts]

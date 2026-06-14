@@ -538,6 +538,106 @@ fn op_dump(opts: Value) -> Result<Value> {
     Ok(json!({"columns": names, "rows": out}))
 }
 
+// ── introspection extras ──────────────────────────────────────────────────────
+
+/// Prepare + run `sql` with no params, returning (column_names, rows-as-json).
+/// Shared by the catalog/listing ops below.
+fn rows_of(conn: &mut mysql::PooledConn, sql: &str) -> Result<(Vec<String>, Vec<Value>)> {
+    use mysql::prelude::Queryable;
+    let stmt = conn.prep(sql)?;
+    let names: Vec<String> = stmt
+        .columns()
+        .iter()
+        .map(|c| c.name_str().to_string())
+        .collect();
+    let rows: Vec<Row> = conn.exec(&stmt, ())?;
+    let out: Vec<Value> = rows.into_iter().map(|r| row_to_json(r, &names)).collect();
+    Ok((names, out))
+}
+
+fn op_explain(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let sql = opts["sql"].as_str().ok_or_else(|| anyhow!("missing sql"))?;
+    let params = params_from_value(&opts["params"]);
+    let stmt = conn.prep(format!("EXPLAIN {}", sql))?;
+    let names: Vec<String> = stmt
+        .columns()
+        .iter()
+        .map(|c| c.name_str().to_string())
+        .collect();
+    let rows: Vec<Row> = match params {
+        Params::Empty => conn.exec(&stmt, ())?,
+        _ => conn.exec(&stmt, params)?,
+    };
+    let out: Vec<Value> = rows.into_iter().map(|r| row_to_json(r, &names)).collect();
+    Ok(json!({"plan": out}))
+}
+
+fn op_views(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(
+        &mut conn,
+        "SELECT table_name FROM information_schema.views WHERE table_schema = DATABASE() ORDER BY table_name",
+    )?;
+    let names: Vec<Value> = rows.into_iter().map(|r| r["table_name"].clone()).collect();
+    Ok(json!({"views": names}))
+}
+
+fn op_procedures(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(
+        &mut conn,
+        "SELECT routine_name, routine_type FROM information_schema.routines \
+         WHERE routine_schema = DATABASE() ORDER BY routine_name",
+    )?;
+    Ok(json!({"routines": rows}))
+}
+
+fn op_indexes(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
+    let (_, rows) = rows_of(&mut conn, &format!("SHOW INDEX FROM {}", table))?;
+    Ok(json!({"table": table, "indexes": rows}))
+}
+
+fn op_triggers(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(&mut conn, "SHOW TRIGGERS")?;
+    Ok(json!({"triggers": rows}))
+}
+
+fn op_users(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(
+        &mut conn,
+        "SELECT user, host FROM mysql.user ORDER BY user, host",
+    )?;
+    Ok(json!({"users": rows}))
+}
+
+fn op_db_size(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let bytes: Option<i64> = conn.query_first(
+        "SELECT COALESCE(SUM(data_length + index_length), 0) \
+         FROM information_schema.tables WHERE table_schema = DATABASE()",
+    )?;
+    Ok(json!({"bytes": bytes.unwrap_or(0)}))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -648,6 +748,41 @@ pub extern "C" fn mysql__call(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__query_multi(args: *const c_char) -> *const c_char {
     ffi_call(args, op_query_multi)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__explain(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_explain)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__views(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_views)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__procedures(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_procedures)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__indexes(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_indexes)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__triggers(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_triggers)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__users(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_users)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__db_size(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_db_size)
 }
 
 #[cfg(test)]

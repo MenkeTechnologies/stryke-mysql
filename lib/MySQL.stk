@@ -328,3 +328,42 @@ fn MySQL::upsert ($table, $row, %opts) {
     val @bind = map { $row->{$_} } @cols
     MySQL::execute($sql, bind => \@bind, MySQL::_conn(\%opts))->{affected}
 }
+
+# ── introspection extras ─────────────────────────────────────────────
+
+## EXPLAIN $sql; opts: params. Returns the plan rows.
+fn MySQL::explain ($sql, %opts) {
+    val $r = MySQL::_req({ sql => $sql, params => $opts{params} }, \%opts)
+    @{ MySQL::_decode("explain", mysql__explain(to_json($r)))->{plan} }
+}
+
+## List view names in the current database.
+fn MySQL::views (%opts) {
+    @{ MySQL::_decode("views", mysql__views(to_json(MySQL::_req({}, \%opts))))->{views} }
+}
+
+## List stored routines ({ ROUTINE_NAME, ROUTINE_TYPE }) in the current database.
+fn MySQL::procedures (%opts) {
+    @{ MySQL::_decode("procedures", mysql__procedures(to_json(MySQL::_req({}, \%opts))))->{routines} }
+}
+
+## SHOW INDEX FROM $table — index metadata rows. Required: table.
+fn MySQL::indexes ($table, %opts) {
+    val $r = MySQL::_req({ table => $table }, \%opts)
+    @{ MySQL::_decode("indexes", mysql__indexes(to_json($r)))->{indexes} }
+}
+
+## SHOW TRIGGERS — trigger metadata rows.
+fn MySQL::triggers (%opts) {
+    @{ MySQL::_decode("triggers", mysql__triggers(to_json(MySQL::_req({}, \%opts))))->{triggers} }
+}
+
+## List accounts ({ user, host }) from mysql.user (needs privilege).
+fn MySQL::users (%opts) {
+    @{ MySQL::_decode("users", mysql__users(to_json(MySQL::_req({}, \%opts))))->{users} }
+}
+
+## Current database size in bytes (data + index length).
+fn MySQL::db_size (%opts) {
+    MySQL::_decode("db_size", mysql__db_size(to_json(MySQL::_req({}, \%opts))))->{bytes}
+}

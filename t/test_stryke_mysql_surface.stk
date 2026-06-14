@@ -43,4 +43,13 @@ assert_ok exists &MySQL::delete, "MySQL::delete exists"
 assert_ok exists &MySQL::truncate, "MySQL::truncate exists"
 assert_ok exists &MySQL::upsert, "MySQL::upsert exists"
 
+# ── MySQL.stk introspection extras ──
+assert_ok exists &MySQL::explain, "MySQL::explain exists"
+assert_ok exists &MySQL::views, "MySQL::views exists"
+assert_ok exists &MySQL::procedures, "MySQL::procedures exists"
+assert_ok exists &MySQL::indexes, "MySQL::indexes exists"
+assert_ok exists &MySQL::triggers, "MySQL::triggers exists"
+assert_ok exists &MySQL::users, "MySQL::users exists"
+assert_ok exists &MySQL::db_size, "MySQL::db_size exists"
+
 test_run

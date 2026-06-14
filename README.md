@@ -239,6 +239,13 @@ MySQL::schema       $table, %opts → { table, columns => [...] }
 MySQL::count        $table, $where?, %opts → $row_count   # SELECT count(*) [WHERE $where]
 MySQL::exists       $table, $where?, %opts → 1 | 0        # SELECT EXISTS(…) — short-circuits
 MySQL::table_exists $name, %opts → 1 | 0                  # $name must be a plain identifier
+MySQL::views        %opts → @names                       # view names in current db
+MySQL::procedures   %opts → @{ {ROUTINE_NAME, ROUTINE_TYPE} }
+MySQL::indexes      $table, %opts → @rows                 # SHOW INDEX FROM $table
+MySQL::triggers     %opts → @rows                         # SHOW TRIGGERS
+MySQL::users        %opts → @{ {user, host} }            # from mysql.user (needs privilege)
+MySQL::explain      $sql, %opts → @plan_rows              # opt: params
+MySQL::db_size      %opts → $bytes                        # data + index length of current db
 ```
 
 `exists` uses SQL `EXISTS`, which stops at the first matching row — prefer

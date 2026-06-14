@@ -25,6 +25,13 @@ exports = [
     "mysql__transaction",
     "mysql__call",
     "mysql__query_multi",
+    "mysql__explain",
+    "mysql__views",
+    "mysql__procedures",
+    "mysql__indexes",
+    "mysql__triggers",
+    "mysql__users",
+    "mysql__db_size",
 ]
 
 [scripts]

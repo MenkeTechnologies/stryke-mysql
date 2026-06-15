@@ -431,6 +431,14 @@ fn MySQL::quote_ident ($name) {
     MySQL::_decode("quote_ident", mysql__quote_ident(to_json({ name => $name })))->{quoted}
 }
 
+## Quote a dotted, qualified identifier — each "."-separated segment is
+## backtick-quoted independently and rejoined, so "mydb.my table" →
+## `mydb`.`my table`. Empty segments (leading/trailing/doubled dot) are rejected.
+fn MySQL::quote_qualified_ident ($name) {
+    MySQL::_decode("quote_qualified_ident",
+        mysql__quote_qualified_ident(to_json({ name => $name })))->{quoted}
+}
+
 ## Quote a MySQL string literal (default mode: backslash-escapes `\` and `'`).
 fn MySQL::quote_literal ($value) {
     MySQL::_decode("quote_literal", mysql__quote_literal(to_json({ value => $value })))->{quoted}

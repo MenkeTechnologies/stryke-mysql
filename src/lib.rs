@@ -876,12 +876,39 @@ fn op_build_dsn(opts: Value) -> Result<Value> {
 }
 
 /// Quote a MySQL identifier with backticks, doubling any embedded backtick.
+/// Backtick-quote a single MySQL identifier, doubling embedded backticks.
+fn quote_ident(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
 fn op_quote_ident(opts: Value) -> Result<Value> {
     let name = opts
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing name"))?;
-    Ok(json!({"quoted": format!("`{}`", name.replace('`', "``"))}))
+    Ok(json!({"quoted": quote_ident(name)}))
+}
+
+/// Quote a dotted, qualified identifier — each `.`-separated segment is quoted
+/// independently and rejoined, so `mydb.my table` becomes `` `mydb`.`my table` ``.
+/// An empty segment (leading, trailing, or doubled dot) is rejected. Pure.
+fn op_quote_qualified_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(anyhow!(
+            "qualified identifier has an empty segment: `{name}`"
+        ));
+    }
+    let quoted = parts
+        .iter()
+        .map(|p| quote_ident(p))
+        .collect::<Vec<_>>()
+        .join(".");
+    Ok(json!({"quoted": quoted, "parts": parts}))
 }
 
 /// Quote a MySQL string literal. In MySQL's default mode the backslash is an
@@ -1045,6 +1072,11 @@ pub extern "C" fn mysql__build_dsn(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__quote_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__quote_qualified_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_qualified_ident)
 }
 
 #[no_mangle]
@@ -1717,6 +1749,27 @@ mod tests {
             json!("`weird``col`"),
             "MySQL doubles backticks"
         );
+    }
+
+    #[test]
+    fn quote_qualified_ident_backticks_each_segment() {
+        let v = op_quote_qualified_ident(json!({"name": "mydb.my table"})).unwrap();
+        assert_eq!(v["quoted"], json!("`mydb`.`my table`"));
+        assert_eq!(v["parts"], json!(["mydb", "my table"]));
+        // Embedded backtick in a segment is doubled within that segment.
+        assert_eq!(
+            op_quote_qualified_ident(json!({"name": "db.we`ird"})).unwrap()["quoted"],
+            json!("`db`.`we``ird`")
+        );
+        // Bare identifier (no dot) still gets backticked.
+        assert_eq!(
+            op_quote_qualified_ident(json!({"name": "users"})).unwrap()["quoted"],
+            json!("`users`")
+        );
+        // Empty segments rejected.
+        assert!(op_quote_qualified_ident(json!({"name": "mydb."})).is_err());
+        assert!(op_quote_qualified_ident(json!({"name": ".tbl"})).is_err());
+        assert!(op_quote_qualified_ident(json!({"name": "a..b"})).is_err());
     }
 
     #[test]

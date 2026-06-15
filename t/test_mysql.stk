@@ -151,6 +151,11 @@ assert_eq $rt->{database}, "app",        "build_dsn → parse_dsn database"
 assert_eq MySQL::quote_ident("weird`col"), "`weird``col`",  "quote_ident uses doubled backticks"
 assert_eq MySQL::quote_literal("O'Brien"), "'O\\'Brien'",   "quote_literal backslash-escapes (default mode)"
 
+# quote_qualified_ident: each dot-separated segment backtick-quoted.
+assert_eq MySQL::quote_qualified_ident("mydb.my table"), "`mydb`.`my table`", "quote_qualified_ident backticks each segment"
+assert_eq MySQL::quote_qualified_ident("users"), "`users`", "quote_qualified_ident: bare identifier still backticked"
+assert_dies fn { MySQL::quote_qualified_ident("mydb.") }, "quote_qualified_ident rejects empty trailing segment"
+
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
 test_run

@@ -59,4 +59,11 @@ assert_ok exists &MySQL::engines, "MySQL::engines exists"
 assert_ok exists &MySQL::table_size, "MySQL::table_size exists"
 assert_ok exists &MySQL::kill, "MySQL::kill exists"
 
+# ── pure DSN/quoting helpers ──
+assert_ok exists &MySQL::parse_dsn, "MySQL::parse_dsn exists"
+assert_ok exists &MySQL::build_dsn, "MySQL::build_dsn exists"
+assert_ok exists &MySQL::quote_ident, "MySQL::quote_ident exists"
+assert_ok exists &MySQL::quote_qualified_ident, "MySQL::quote_qualified_ident exists"
+assert_ok exists &MySQL::quote_literal, "MySQL::quote_literal exists"
+
 test_run

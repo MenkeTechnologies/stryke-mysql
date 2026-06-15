@@ -163,6 +163,15 @@ assert_eq MySQL::quote_qualified_ident("mydb.my table"), "`mydb`.`my table`", "q
 assert_eq MySQL::quote_qualified_ident("users"), "`users`", "quote_qualified_ident: bare identifier still backticked"
 assert_dies fn { MySQL::quote_qualified_ident("mydb.") }, "quote_qualified_ident rejects empty trailing segment"
 
+# parse_qualified_ident: inverse of quote_qualified_ident (backtick variant).
+val $segs = MySQL::parse_qualified_ident("`mydb`.`my table`")
+assert_eq scalar(@$segs), 2,      "parse_qualified_ident: two segments"
+assert_eq $segs->[1], "my table", "parse_qualified_ident: quoted segment keeps the space"
+assert_eq MySQL::parse_qualified_ident("`a.b`.`c`")->[0], "a.b", "parse_qualified_ident: dot inside backticks is literal"
+assert_eq MySQL::parse_qualified_ident("`we``ird`")->[0], "we`ird", "parse_qualified_ident: doubled backtick decodes to one"
+assert_eq MySQL::parse_qualified_ident(MySQL::quote_qualified_ident("mydb.my table"))->[1], "my table", "parse_qualified_ident: round-trips quote_qualified_ident"
+assert_dies fn { MySQL::parse_qualified_ident("a..b") }, "parse_qualified_ident: rejects an empty segment"
+
 # format_in_list: parenthesized quoted IN-list (MySQL value-set idiom).
 assert_eq MySQL::format_in_list(["a", "b", "c"]), "('a','b','c')", "format_in_list: quotes each element"
 assert_eq MySQL::format_in_list(["O'Brien"]), "('O\\'Brien')",     "format_in_list: MySQL literal escaping"

@@ -911,6 +911,66 @@ fn op_quote_qualified_ident(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quoted, "parts": parts}))
 }
 
+/// Parse a dotted, possibly-backtick-quoted qualified identifier into its
+/// segments — the inverse of `quote_qualified_ident`. A backtick-quoted segment
+/// may contain `.` (kept literal) and a doubled backtick (un-doubled to one);
+/// bare segments pass through. A `.` outside backticks separates segments; an
+/// unquoted empty segment and an unterminated backtick are rejected. opts:
+/// `name` (required). Returns `{parts}`. Pure.
+fn op_parse_qualified_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .or_else(|| opts.get("ident"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    let chars: Vec<char> = name.chars().collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut had_content = false;
+    let mut in_quote = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_quote {
+            if c == '`' {
+                if i + 1 < chars.len() && chars[i + 1] == '`' {
+                    cur.push('`');
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+                i += 1;
+            } else {
+                cur.push(c);
+                i += 1;
+            }
+        } else if c == '`' {
+            in_quote = true;
+            had_content = true;
+            i += 1;
+        } else if c == '.' {
+            if !had_content {
+                return Err(anyhow!("empty segment in qualified identifier: `{name}`"));
+            }
+            parts.push(std::mem::take(&mut cur));
+            had_content = false;
+            i += 1;
+        } else {
+            cur.push(c);
+            had_content = true;
+            i += 1;
+        }
+    }
+    if in_quote {
+        return Err(anyhow!("unterminated quoted identifier: `{name}`"));
+    }
+    if !had_content {
+        return Err(anyhow!("empty segment in qualified identifier: `{name}`"));
+    }
+    parts.push(cur);
+    Ok(json!({ "parts": parts }))
+}
+
 /// Quote a single MySQL string literal. Default mode: backslash is an escape
 /// char, so escape `\` first, then `'` — `O'Brien` → `'O\'Brien'`.
 fn quote_literal_str(value: &str) -> String {
@@ -1155,6 +1215,11 @@ pub extern "C" fn mysql__quote_ident(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__quote_qualified_ident(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_qualified_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__parse_qualified_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_qualified_ident)
 }
 
 #[no_mangle]
@@ -1858,6 +1923,45 @@ mod tests {
         assert!(op_quote_qualified_ident(json!({"name": "mydb."})).is_err());
         assert!(op_quote_qualified_ident(json!({"name": ".tbl"})).is_err());
         assert!(op_quote_qualified_ident(json!({"name": "a..b"})).is_err());
+    }
+
+    #[test]
+    fn parse_qualified_ident_inverts_quote_qualified_ident() {
+        // Backtick-quoted segments: a `.` inside stays, doubled backtick un-doubles.
+        assert_eq!(
+            op_parse_qualified_ident(json!({"name": "`mydb`.`my table`"})).unwrap()["parts"],
+            json!(["mydb", "my table"])
+        );
+        assert_eq!(
+            op_parse_qualified_ident(json!({"name": "`a.b`.`c`"})).unwrap()["parts"],
+            json!(["a.b", "c"]),
+            "dot inside backticks is literal"
+        );
+        assert_eq!(
+            op_parse_qualified_ident(json!({"name": "`we``ird`"})).unwrap()["parts"],
+            json!(["we`ird"]),
+            "doubled backtick decodes to one"
+        );
+        // Bare (unquoted) segments pass through.
+        assert_eq!(
+            op_parse_qualified_ident(json!({"name": "mydb.users"})).unwrap()["parts"],
+            json!(["mydb", "users"])
+        );
+        // Round-trips quote_qualified_ident across tricky names.
+        for name in ["mydb.my table", "db.we`ird", "users"] {
+            let quoted = op_quote_qualified_ident(json!({ "name": name })).unwrap()["quoted"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let parts =
+                op_parse_qualified_ident(json!({ "name": quoted })).unwrap()["parts"].clone();
+            let original: Vec<&str> = name.split('.').collect();
+            assert_eq!(parts, json!(original), "round-trip for {name}");
+        }
+        // Unquoted empty segments and an unterminated backtick are rejected.
+        assert!(op_parse_qualified_ident(json!({"name": "a..b"})).is_err());
+        assert!(op_parse_qualified_ident(json!({"name": ".x"})).is_err());
+        assert!(op_parse_qualified_ident(json!({"name": "`unterminated"})).is_err());
     }
 
     #[test]

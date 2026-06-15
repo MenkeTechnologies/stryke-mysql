@@ -439,6 +439,14 @@ fn MySQL::quote_qualified_ident ($name) {
         mysql__quote_qualified_ident(to_json({ name => $name })))->{quoted}
 }
 
+## Parse a dotted, possibly-backtick-quoted qualified identifier into its
+## segments — inverse of quote_qualified_ident. A "."-inside-backticks stays
+## literal and a doubled backtick un-doubles. Returns an arrayref of segments.
+fn MySQL::parse_qualified_ident ($name) {
+    MySQL::_decode("parse_qualified_ident",
+        mysql__parse_qualified_ident(to_json({ name => $name })))->{parts}
+}
+
 ## Quote a MySQL string literal (default mode: backslash-escapes `\` and `'`).
 fn MySQL::quote_literal ($value) {
     MySQL::_decode("quote_literal", mysql__quote_literal(to_json({ value => $value })))->{quoted}

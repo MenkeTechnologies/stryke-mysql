@@ -265,15 +265,27 @@ MySQL::version()           → $version_string   # cdylib's CARGO_PKG_VERSION
 MySQL::server_version(%opts) → $server_version # live `SELECT VERSION()`
 ```
 
+### Pure helpers (no connection)
+
+```stryke
+MySQL::parse_dsn($dsn)      → { scheme, user, password, host, port, database, params }
+MySQL::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of parse_dsn
+MySQL::quote_ident($name)   → $quoted     # `weird``col` (backticks, MySQL style)
+MySQL::quote_literal($val)  → $quoted     # 'O\'Brien' (backslash-escapes, default mode)
+```
+
 ## [0x05] FFI layer
 
 Each `MySQL::*` wrapper builds a JSON args dict and calls a sibling
 `mysql__*` symbol resolved out of `libstryke_mysql.{dylib,so}`. The
 cdylib is dlopened in-process on first `use MySQL` (via stryke's
-`pkg::commands::try_load_ffi_for` resolver hook) and exposes 11 entry
-points: `mysql__pkg_version`, `mysql__version`, `mysql__ping`,
-`mysql__databases`, `mysql__tables`, `mysql__schema`, `mysql__query`,
-`mysql__execute`, `mysql__exec`, `mysql__insert_many`, `mysql__dump`.
+`pkg::commands::try_load_ffi_for` resolver hook). Its exports cover the
+query/introspection surface (`mysql__pkg_version`, `mysql__version`,
+`mysql__ping`, `mysql__databases`, `mysql__tables`, `mysql__schema`,
+`mysql__query`, `mysql__execute`, `mysql__insert_many`, `mysql__dump`, …)
+plus connection-free helpers (`mysql__parse_dsn`, `mysql__build_dsn`,
+`mysql__quote_ident`, `mysql__quote_literal`). The authoritative list is
+`[ffi].exports` in `stryke.toml`.
 
 A `mysql::Pool` cache keyed by connection URL is held in `OnceCell`,
 so back-to-back calls reuse the same connection pool.

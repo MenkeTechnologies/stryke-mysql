@@ -1,6 +1,6 @@
 [package]
 name = "stryke-mysql"
-version = "0.4.3"
+version = "0.5.0"
 description = "MySQL / MariaDB client for stryke. cdylib loaded in-process — persistent mysql::Pool per connection URL across calls."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -38,6 +38,10 @@ exports = [
     "mysql__engines",
     "mysql__table_size",
     "mysql__kill",
+    "mysql__parse_dsn",
+    "mysql__build_dsn",
+    "mysql__quote_ident",
+    "mysql__quote_literal",
 ]
 
 [scripts]

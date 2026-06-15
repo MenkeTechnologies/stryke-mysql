@@ -403,3 +403,35 @@ fn MySQL::kill ($id, %opts) {
     val $r = MySQL::_req({ id => $id }, \%opts)
     MySQL::_decode("kill", mysql__kill(to_json($r)))
 }
+
+# ── pure helpers (no connection) ──────────────────────────────────────
+
+## Parse a URI DSN "mysql|mariadb://[user[:pass]@]host[:port][/db][?k=v]" into
+## a hashref { scheme, user, password, host, port, database, params }. Userinfo,
+## database and param values are percent-decoded.
+fn MySQL::parse_dsn ($dsn) {
+    MySQL::_decode("parse_dsn", mysql__parse_dsn(to_json({ dsn => $dsn })))
+}
+
+## Build a URI DSN from explicit parts (percent-encoded). opts: user, password,
+## host, port, database. Inverse of parse_dsn.
+fn MySQL::build_dsn (%opts) {
+    val %req = (
+        user => $opts{user},
+        password => $opts{password},
+        host => $opts{host},
+        port => $opts{port},
+        database => $opts{database},
+    )
+    MySQL::_decode("build_dsn", mysql__build_dsn(to_json(\%req)))->{dsn}
+}
+
+## Quote a MySQL identifier with backticks (embedded backticks doubled).
+fn MySQL::quote_ident ($name) {
+    MySQL::_decode("quote_ident", mysql__quote_ident(to_json({ name => $name })))->{quoted}
+}
+
+## Quote a MySQL string literal (default mode: backslash-escapes `\` and `'`).
+fn MySQL::quote_literal ($value) {
+    MySQL::_decode("quote_literal", mysql__quote_literal(to_json({ value => $value })))->{quoted}
+}

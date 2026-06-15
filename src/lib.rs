@@ -753,6 +753,148 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
     drop(CString::from_raw(p));
 }
 
+// ── pure helpers (no connection) ─────────────────────────────────────────────
+
+/// RFC 3986 percent-encode for the URI userinfo / path component — anything
+/// outside the unreserved set is escaped, so `@`/`:`/`/` in a password survive.
+fn percent_encode_userinfo(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Inverse of `percent_encode_userinfo`. Invalid escapes are left verbatim.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parse a URI DSN `mysql|mariadb://[user[:pass]@]host[:port][/db][?k=v…]` into
+/// its components (userinfo/db/params percent-decoded). Pure — no connection.
+fn op_parse_dsn(opts: Value) -> Result<Value> {
+    let dsn = opts
+        .get("dsn")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing dsn"))?;
+    let (scheme, rest) = dsn
+        .split_once("://")
+        .ok_or_else(|| anyhow!("not a URI DSN (missing `://`): {dsn}"))?;
+    if !matches!(scheme, "mysql" | "mariadb") {
+        bail!("unsupported scheme `{scheme}` (want mysql|mariadb)");
+    }
+    let (authority_path, query) = match rest.split_once('?') {
+        Some((ap, q)) => (ap, Some(q)),
+        None => (rest, None),
+    };
+    let (authority, path) = match authority_path.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (authority_path, None),
+    };
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, authority),
+    };
+    let (user, password) = match userinfo {
+        Some(ui) => match ui.split_once(':') {
+            Some((u, p)) => (Some(percent_decode(u)), Some(percent_decode(p))),
+            None => (Some(percent_decode(ui)), None),
+        },
+        None => (None, None),
+    };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => (h.to_string(), p.parse::<u32>().ok()),
+        _ => (hostport.to_string(), None),
+    };
+    let database = path.map(percent_decode);
+    let mut params = serde_json::Map::new();
+    if let Some(q) = query {
+        for pair in q.split('&').filter(|s| !s.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            params.insert(percent_decode(k), json!(percent_decode(v)));
+        }
+    }
+    Ok(json!({
+        "scheme": scheme,
+        "user": user,
+        "password": password,
+        "host": host,
+        "port": port,
+        "database": database,
+        "params": Value::Object(params),
+    }))
+}
+
+/// Build a URI DSN from explicit parts, percent-encoding userinfo + database.
+/// Deterministic — the inverse of `parse_dsn`. opts: user, password, host,
+/// port, database.
+fn op_build_dsn(opts: Value) -> Result<Value> {
+    let user = opts.get("user").and_then(Value::as_str).unwrap_or("root");
+    let host = opts
+        .get("host")
+        .and_then(Value::as_str)
+        .unwrap_or("127.0.0.1");
+    let port = opts.get("port").and_then(Value::as_u64).unwrap_or(3306);
+    let database = opts.get("database").and_then(Value::as_str).unwrap_or("");
+    let userinfo = match opts.get("password").and_then(Value::as_str) {
+        Some(p) if !p.is_empty() => format!(
+            "{}:{}",
+            percent_encode_userinfo(user),
+            percent_encode_userinfo(p)
+        ),
+        _ => percent_encode_userinfo(user),
+    };
+    let dsn = format!(
+        "mysql://{}@{}:{}/{}",
+        userinfo,
+        host,
+        port,
+        percent_encode_userinfo(database)
+    );
+    Ok(json!({"dsn": dsn}))
+}
+
+/// Quote a MySQL identifier with backticks, doubling any embedded backtick.
+fn op_quote_ident(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing name"))?;
+    Ok(json!({"quoted": format!("`{}`", name.replace('`', "``"))}))
+}
+
+/// Quote a MySQL string literal. In MySQL's default mode the backslash is an
+/// escape character, so escape `\` first, then `'` — `O'Brien` → `'O\'Brien'`.
+fn op_quote_literal(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+    Ok(json!({"quoted": format!("'{escaped}'")}))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -888,6 +1030,26 @@ pub extern "C" fn mysql__table_size(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__kill(args: *const c_char) -> *const c_char {
     ffi_call(args, op_kill)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__parse_dsn(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_dsn)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__build_dsn(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_dsn)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__quote_ident(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_ident)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__quote_literal(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote_literal)
 }
 
 #[cfg(test)]
@@ -1495,5 +1657,86 @@ mod tests {
                 .to_string()
                 .contains("missing sql"));
         });
+    }
+
+    // ── pure DSN / quoting helpers (no connection) ───────────────────────────
+
+    #[test]
+    fn parse_dsn_full_uri_decomposes_every_part() {
+        let v = op_parse_dsn(json!({
+            "dsn": "mysql://app:s3cret@db.example.com:3307/shop?charset=utf8mb4&ssl_mode=REQUIRED"
+        }))
+        .unwrap();
+        assert_eq!(v["scheme"], json!("mysql"));
+        assert_eq!(v["user"], json!("app"));
+        assert_eq!(v["password"], json!("s3cret"));
+        assert_eq!(v["host"], json!("db.example.com"));
+        assert_eq!(v["port"], json!(3307));
+        assert_eq!(v["database"], json!("shop"));
+        assert_eq!(v["params"]["charset"], json!("utf8mb4"));
+        assert_eq!(v["params"]["ssl_mode"], json!("REQUIRED"));
+    }
+
+    #[test]
+    fn parse_dsn_percent_decodes_userinfo_and_accepts_mariadb() {
+        let v = op_parse_dsn(json!({"dsn": "mariadb://u:p%40ss@localhost/db"})).unwrap();
+        assert_eq!(v["scheme"], json!("mariadb"));
+        assert_eq!(v["password"], json!("p@ss"));
+        assert_eq!(v["port"], Value::Null);
+    }
+
+    #[test]
+    fn parse_dsn_rejects_bad_scheme_and_non_uri() {
+        assert!(op_parse_dsn(json!({"dsn": "postgres://localhost/x"})).is_err());
+        assert!(op_parse_dsn(json!({"dsn": "host=localhost"})).is_err());
+        assert!(op_parse_dsn(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_dsn_round_trips_through_parse() {
+        let built = op_build_dsn(json!({
+            "user": "u", "password": "p@ss/word", "host": "127.0.0.1", "port": 3306, "database": "app"
+        }))
+        .unwrap();
+        let dsn = built["dsn"].as_str().unwrap();
+        let parsed = op_parse_dsn(json!({"dsn": dsn})).unwrap();
+        assert_eq!(parsed["user"], json!("u"));
+        assert_eq!(
+            parsed["password"],
+            json!("p@ss/word"),
+            "round-trips @ and / in the password"
+        );
+        assert_eq!(parsed["database"], json!("app"));
+    }
+
+    #[test]
+    fn quote_ident_uses_backticks_not_double_quotes() {
+        let v = op_quote_ident(json!({"name": "weird`col"})).unwrap();
+        assert_eq!(
+            v["quoted"],
+            json!("`weird``col`"),
+            "MySQL doubles backticks"
+        );
+    }
+
+    #[test]
+    fn quote_literal_backslash_escapes_default_mode() {
+        // MySQL default mode: backslash is an escape char, so both `'` and `\`
+        // must be backslash-escaped — distinct from Postgres's `''` doubling.
+        assert_eq!(
+            op_quote_literal(json!({"value": "O'Brien"})).unwrap()["quoted"],
+            json!("'O\\'Brien'")
+        );
+        assert_eq!(
+            op_quote_literal(json!({"value": "a\\b"})).unwrap()["quoted"],
+            json!("'a\\\\b'")
+        );
+    }
+
+    #[test]
+    fn percent_decode_is_tolerant_of_bad_escapes() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
     }
 }

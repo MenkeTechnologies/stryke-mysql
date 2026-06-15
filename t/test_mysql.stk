@@ -133,4 +133,24 @@ if ($alive) {
     eval { MySQL::execute("DROP TABLE $tbl", url => $dsn) }
 }
 
+# ── pure helpers (no connection — always run) ────────────────────────
+# Note: `\@` escapes the at-sign so stryke doesn't array-interpolate it.
+val $p = MySQL::parse_dsn("mysql://app:s3cret\@db.example.com:3307/shop?charset=utf8mb4")
+assert_eq $p->{user},     "app",            "parse_dsn: user"
+assert_eq $p->{password}, "s3cret",         "parse_dsn: password"
+assert_eq $p->{host},     "db.example.com", "parse_dsn: host"
+assert_eq $p->{port},     3307,             "parse_dsn: port"
+assert_eq $p->{database}, "shop",           "parse_dsn: database"
+assert_eq $p->{params}{charset}, "utf8mb4", "parse_dsn: param"
+
+val $built = MySQL::build_dsn(user => "u", password => "p\@ss/word", host => "127.0.0.1", port => 3306, database => "app")
+val $rt = MySQL::parse_dsn($built)
+assert_eq $rt->{password}, "p\@ss/word", "build_dsn → parse_dsn round-trips @ and / in password"
+assert_eq $rt->{database}, "app",        "build_dsn → parse_dsn database"
+
+assert_eq MySQL::quote_ident("weird`col"), "`weird``col`",  "quote_ident uses doubled backticks"
+assert_eq MySQL::quote_literal("O'Brien"), "'O\\'Brien'",   "quote_literal backslash-escapes (default mode)"
+
+assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
+
 test_run

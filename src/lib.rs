@@ -947,6 +947,59 @@ fn op_format_in_list(opts: Value) -> Result<Value> {
     Ok(json!({"list": format!("({})", quoted.join(","))}))
 }
 
+/// Decode a MySQL string literal back to its raw value — inverse of
+/// `quote_literal`. The input must be wrapped in matching `'` or `"` quotes.
+/// Backslash escapes follow MySQL's default mode: `\0 \b \n \r \t \Z` map to
+/// their control characters, `\' \" \\` to the literal char, `\% \_` keep the
+/// backslash (LIKE metacharacters), and any other `\X` collapses to `X`. A
+/// doubled quote (`''` inside a `'`-quoted literal) decodes to one quote.
+/// opts: value (required). Returns `{value}`. Pure.
+fn op_unquote_literal(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let mut chars = input.chars();
+    let quote = chars
+        .next()
+        .filter(|c| *c == '\'' || *c == '"')
+        .ok_or_else(|| anyhow!("not a quoted literal (must start with ' or \"): {input}"))?;
+    let body: Vec<char> = chars.collect();
+    if body.last() != Some(&quote) {
+        return Err(anyhow!(
+            "unterminated literal (no closing {quote}): {input}"
+        ));
+    }
+    let inner = &body[..body.len() - 1];
+    let mut out = String::new();
+    let mut i = 0;
+    while i < inner.len() {
+        let c = inner[i];
+        if c == '\\' && i + 1 < inner.len() {
+            let n = inner[i + 1];
+            match n {
+                '0' => out.push('\0'),
+                'b' => out.push('\u{0008}'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'Z' => out.push('\u{001a}'),
+                '%' => out.push_str("\\%"),
+                '_' => out.push_str("\\_"),
+                other => out.push(other),
+            }
+            i += 2;
+        } else if c == quote && i + 1 < inner.len() && inner[i + 1] == quote {
+            out.push(quote);
+            i += 2;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    Ok(json!({ "value": out }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1107,6 +1160,11 @@ pub extern "C" fn mysql__quote_qualified_ident(args: *const c_char) -> *const c_
 #[no_mangle]
 pub extern "C" fn mysql__quote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__unquote_literal(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unquote_literal)
 }
 
 #[no_mangle]
@@ -1814,6 +1872,41 @@ mod tests {
             op_quote_literal(json!({"value": "a\\b"})).unwrap()["quoted"],
             json!("'a\\\\b'")
         );
+    }
+
+    #[test]
+    fn unquote_literal_inverts_quote_literal_and_decodes_escapes() {
+        // Inverts quote_literal for the chars it escapes (`'` and `\`).
+        for raw in ["O'Brien", "a\\b", "plain", "tab\tand\nnewline", ""] {
+            let q = op_quote_literal(json!({ "value": raw })).unwrap()["quoted"].clone();
+            assert_eq!(
+                op_unquote_literal(json!({ "value": q })).unwrap()["value"],
+                json!(raw),
+                "round-trip for {raw:?}"
+            );
+        }
+        // Full control-char escape set.
+        assert_eq!(
+            op_unquote_literal(json!({"value": "'\\0\\b\\n\\r\\t\\Z'"})).unwrap()["value"],
+            json!("\u{0}\u{8}\n\r\t\u{1a}")
+        );
+        // LIKE metacharacters keep their backslash; double-quoted literal works.
+        assert_eq!(
+            op_unquote_literal(json!({"value": "'a\\%b\\_c'"})).unwrap()["value"],
+            json!("a\\%b\\_c")
+        );
+        assert_eq!(
+            op_unquote_literal(json!({"value": "\"say \\\"hi\\\"\""})).unwrap()["value"],
+            json!("say \"hi\"")
+        );
+        // Doubled quote inside decodes to one.
+        assert_eq!(
+            op_unquote_literal(json!({"value": "'it''s'"})).unwrap()["value"],
+            json!("it's")
+        );
+        // Unquoted / unterminated input rejects.
+        assert!(op_unquote_literal(json!({"value": "no quotes"})).is_err());
+        assert!(op_unquote_literal(json!({"value": "'unterminated"})).is_err());
     }
 
     #[test]

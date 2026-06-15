@@ -273,6 +273,7 @@ MySQL::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of pars
 MySQL::quote_ident($name)   → $quoted     # `weird``col` (backticks, MySQL style)
 MySQL::quote_qualified_ident($name) → $quoted  # mydb.my table → `mydb`.`my table`
 MySQL::quote_literal($val)  → $quoted     # 'O\'Brien' (backslash-escapes, default mode)
+MySQL::unquote_literal($lit) → $val       # 'O\'Brien' → O'Brien; decodes \0\b\n\r\t\Z, keeps \%\_; inverse of quote_literal
 MySQL::format_in_list(\@elems) → $list    # ["a","b"] → ('a','b'); empty → (NULL)
 ```
 

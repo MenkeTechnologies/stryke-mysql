@@ -444,6 +444,14 @@ fn MySQL::quote_literal ($value) {
     MySQL::_decode("quote_literal", mysql__quote_literal(to_json({ value => $value })))->{quoted}
 }
 
+## Decode a MySQL string literal back to its raw value — inverse of
+## quote_literal. Handles the default-mode backslash escapes (\0 \b \n \r \t \Z
+## \' \" \\), keeps \% and \_ (LIKE metacharacters), and collapses doubled
+## quotes. Input must be wrapped in matching ' or " quotes.
+fn MySQL::unquote_literal ($value) {
+    MySQL::_decode("unquote_literal", mysql__unquote_literal(to_json({ value => $value })))->{value}
+}
+
 ## Build a parenthesized, quoted "IN (...)" value list from an arrayref of
 ## strings (MySQL's idiom for value sets — no array type). Each element is
 ## escaped like quote_literal; an empty list yields "(NULL)" (matches nothing).

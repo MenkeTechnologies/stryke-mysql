@@ -156,6 +156,11 @@ assert_eq MySQL::quote_qualified_ident("mydb.my table"), "`mydb`.`my table`", "q
 assert_eq MySQL::quote_qualified_ident("users"), "`users`", "quote_qualified_ident: bare identifier still backticked"
 assert_dies fn { MySQL::quote_qualified_ident("mydb.") }, "quote_qualified_ident rejects empty trailing segment"
 
+# format_in_list: parenthesized quoted IN-list (MySQL value-set idiom).
+assert_eq MySQL::format_in_list(["a", "b", "c"]), "('a','b','c')", "format_in_list: quotes each element"
+assert_eq MySQL::format_in_list(["O'Brien"]), "('O\\'Brien')",     "format_in_list: MySQL literal escaping"
+assert_eq MySQL::format_in_list([]), "(NULL)",                     "format_in_list: empty → (NULL)"
+
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
 test_run

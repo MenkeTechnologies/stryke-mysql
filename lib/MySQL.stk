@@ -443,3 +443,10 @@ fn MySQL::quote_qualified_ident ($name) {
 fn MySQL::quote_literal ($value) {
     MySQL::_decode("quote_literal", mysql__quote_literal(to_json({ value => $value })))->{quoted}
 }
+
+## Build a parenthesized, quoted "IN (...)" value list from an arrayref of
+## strings (MySQL's idiom for value sets — no array type). Each element is
+## escaped like quote_literal; an empty list yields "(NULL)" (matches nothing).
+fn MySQL::format_in_list ($elements) {
+    MySQL::_decode("format_in_list", mysql__format_in_list(to_json({ elements => $elements })))->{list}
+}

@@ -65,5 +65,6 @@ assert_ok exists &MySQL::build_dsn, "MySQL::build_dsn exists"
 assert_ok exists &MySQL::quote_ident, "MySQL::quote_ident exists"
 assert_ok exists &MySQL::quote_qualified_ident, "MySQL::quote_qualified_ident exists"
 assert_ok exists &MySQL::quote_literal, "MySQL::quote_literal exists"
+assert_ok exists &MySQL::format_in_list, "MySQL::format_in_list exists"
 
 test_run

@@ -911,6 +911,13 @@ fn op_quote_qualified_ident(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quoted, "parts": parts}))
 }
 
+/// Quote a single MySQL string literal. Default mode: backslash is an escape
+/// char, so escape `\` first, then `'` — `O'Brien` → `'O\'Brien'`.
+fn quote_literal_str(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+    format!("'{escaped}'")
+}
+
 /// Quote a MySQL string literal. In MySQL's default mode the backslash is an
 /// escape character, so escape `\` first, then `'` — `O'Brien` → `'O\'Brien'`.
 fn op_quote_literal(opts: Value) -> Result<Value> {
@@ -918,8 +925,26 @@ fn op_quote_literal(opts: Value) -> Result<Value> {
         .get("value")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing value"))?;
-    let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
-    Ok(json!({"quoted": format!("'{escaped}'")}))
+    Ok(json!({"quoted": quote_literal_str(value)}))
+}
+
+/// Build a parenthesized, quoted `IN (...)` value list from a list of string
+/// `elements` — MySQL's idiom for value sets (it has no array type). Each
+/// element is quoted with `quote_literal`'s escaping; an empty list yields
+/// `(NULL)` so `col IN (NULL)` is valid SQL that matches nothing. Pure.
+fn op_format_in_list(opts: Value) -> Result<Value> {
+    let elements = opts
+        .get("elements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing elements (array of strings)"))?;
+    if elements.is_empty() {
+        return Ok(json!({"list": "(NULL)"}));
+    }
+    let quoted: Vec<String> = elements
+        .iter()
+        .map(|e| quote_literal_str(e.as_str().unwrap_or("")))
+        .collect();
+    Ok(json!({"list": format!("({})", quoted.join(","))}))
 }
 
 // ── exports ─────────────────────────────────────────────────────────────────
@@ -1082,6 +1107,11 @@ pub extern "C" fn mysql__quote_qualified_ident(args: *const c_char) -> *const c_
 #[no_mangle]
 pub extern "C" fn mysql__quote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__format_in_list(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_format_in_list)
 }
 
 #[cfg(test)]
@@ -1784,6 +1814,25 @@ mod tests {
             op_quote_literal(json!({"value": "a\\b"})).unwrap()["quoted"],
             json!("'a\\\\b'")
         );
+    }
+
+    #[test]
+    fn format_in_list_quotes_each_element_and_handles_empty() {
+        assert_eq!(
+            op_format_in_list(json!({"elements": ["a", "b", "c"]})).unwrap()["list"],
+            json!("('a','b','c')")
+        );
+        // Each element gets MySQL literal escaping (backslash for `'`).
+        assert_eq!(
+            op_format_in_list(json!({"elements": ["O'Brien", "x"]})).unwrap()["list"],
+            json!("('O\\'Brien','x')")
+        );
+        // Empty list → (NULL): valid SQL that matches nothing.
+        assert_eq!(
+            op_format_in_list(json!({"elements": []})).unwrap()["list"],
+            json!("(NULL)")
+        );
+        assert!(op_format_in_list(json!({})).is_err());
     }
 
     #[test]

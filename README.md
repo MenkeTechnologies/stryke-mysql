@@ -273,6 +273,7 @@ MySQL::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of pars
 MySQL::quote_ident($name)   → $quoted     # `weird``col` (backticks, MySQL style)
 MySQL::quote_qualified_ident($name) → $quoted  # mydb.my table → `mydb`.`my table`
 MySQL::quote_literal($val)  → $quoted     # 'O\'Brien' (backslash-escapes, default mode)
+MySQL::format_in_list(\@elems) → $list    # ["a","b"] → ('a','b'); empty → (NULL)
 ```
 
 ## [0x05] FFI layer
@@ -286,7 +287,7 @@ query/introspection surface (`mysql__pkg_version`, `mysql__version`,
 `mysql__query`, `mysql__execute`, `mysql__insert_many`, `mysql__dump`, …)
 plus connection-free helpers (`mysql__parse_dsn`, `mysql__build_dsn`,
 `mysql__quote_ident`, `mysql__quote_qualified_ident`,
-`mysql__quote_literal`). The authoritative list is
+`mysql__quote_literal`, `mysql__format_in_list`). The authoritative list is
 `[ffi].exports` in `stryke.toml`.
 
 A `mysql::Pool` cache keyed by connection URL is held in `OnceCell`,

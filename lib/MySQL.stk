@@ -452,6 +452,13 @@ fn MySQL::quote_literal ($value) {
     MySQL::_decode("quote_literal", mysql__quote_literal(to_json({ value => $value })))->{quoted}
 }
 
+## Escape the LIKE metacharacters (\ % _) in $value so it matches literally in a
+## LIKE clause. This is the LIKE-pattern level only — wrap the result with
+## quote_literal to inline it as a string. Returns the escaped string.
+fn MySQL::escape_like ($value) {
+    MySQL::_decode("escape_like", mysql__escape_like(to_json({ value => $value })))->{escaped}
+}
+
 ## Decode a MySQL string literal back to its raw value — inverse of
 ## quote_literal. Handles the default-mode backslash escapes (\0 \b \n \r \t \Z
 ## \' \" \\), keeps \% and \_ (LIKE metacharacters), and collapses doubled

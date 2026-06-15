@@ -988,6 +988,25 @@ fn op_quote_literal(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quote_literal_str(value)}))
 }
 
+/// Escape the LIKE metacharacters in a value so it matches literally in a `LIKE`
+/// clause: each `\`, `%`, and `_` is backslash-prefixed (the default LIKE escape
+/// is `\`). This is the LIKE-pattern level only — wrap the result with
+/// `quote_literal` to inline it as a string (which adds the separate SQL-literal
+/// backslash doubling). opts: `value` (required). Returns `{escaped}`. Pure.
+fn op_escape_like(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    // Escape the backslash first so the `%`/`_` escapes it then adds aren't
+    // themselves doubled.
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    Ok(json!({ "escaped": escaped }))
+}
+
 /// Build a parenthesized, quoted `IN (...)` value list from a list of string
 /// `elements` — MySQL's idiom for value sets (it has no array type). Each
 /// element is quoted with `quote_literal`'s escaping; an empty list yields
@@ -1225,6 +1244,11 @@ pub extern "C" fn mysql__parse_qualified_ident(args: *const c_char) -> *const c_
 #[no_mangle]
 pub extern "C" fn mysql__quote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__escape_like(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_escape_like)
 }
 
 #[no_mangle]
@@ -1976,6 +2000,34 @@ mod tests {
             op_quote_literal(json!({"value": "a\\b"})).unwrap()["quoted"],
             json!("'a\\\\b'")
         );
+    }
+
+    #[test]
+    fn escape_like_backslash_prefixes_metacharacters() {
+        // `%` and `_` each get a single backslash so LIKE matches them literally.
+        assert_eq!(
+            op_escape_like(json!({"value": "100%"})).unwrap()["escaped"],
+            json!("100\\%")
+        );
+        assert_eq!(
+            op_escape_like(json!({"value": "a_b"})).unwrap()["escaped"],
+            json!("a\\_b")
+        );
+        // A literal backslash is doubled (escaped first), and both wildcards in one.
+        assert_eq!(
+            op_escape_like(json!({"value": "c\\d"})).unwrap()["escaped"],
+            json!("c\\\\d")
+        );
+        assert_eq!(
+            op_escape_like(json!({"value": "50%_off"})).unwrap()["escaped"],
+            json!("50\\%\\_off")
+        );
+        // A string with no metacharacters is unchanged.
+        assert_eq!(
+            op_escape_like(json!({"value": "plain"})).unwrap()["escaped"],
+            json!("plain")
+        );
+        assert!(op_escape_like(json!({})).is_err());
     }
 
     #[test]

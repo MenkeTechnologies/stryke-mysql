@@ -1059,6 +1059,35 @@ fn op_escape_like(opts: Value) -> Result<Value> {
     Ok(json!({ "escaped": escape_like_str(value) }))
 }
 
+/// Inverse of `escape_like_str`: decode `\\` → `\`, `\%` → `%`, `\_` → `_` with a
+/// single left-to-right scan (a naive sequence of `replace`s would mis-handle a
+/// `\\` adjacent to a `%`/`_`). A backslash not introducing one of those escapes
+/// is left literal.
+fn unescape_like_str(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '\\' | '%' | '_') {
+            out.push(chars[i + 1]);
+            i += 2;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn op_unescape_like(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .or_else(|| opts.get("escaped"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    Ok(json!({ "value": unescape_like_str(value) }))
+}
+
 /// Build a MySQL `LIKE` pattern from a literal substring for the common
 /// search-box shapes. The substring's LIKE metacharacters (`\`, `%`, `_`) are
 /// escaped (as `escape_like` does), then wildcards are added per `mode`:
@@ -1431,6 +1460,11 @@ pub extern "C" fn mysql__quote(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__escape_like(args: *const c_char) -> *const c_char {
     ffi_call(args, op_escape_like)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__unescape_like(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unescape_like)
 }
 
 #[no_mangle]
@@ -2273,6 +2307,36 @@ mod tests {
             json!("plain")
         );
         assert!(op_escape_like(json!({})).is_err());
+    }
+
+    #[test]
+    fn unescape_like_inverts_escape_like() {
+        let un = |s: &str| {
+            op_unescape_like(json!({ "value": s })).unwrap()["value"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // The three escape forms decode back.
+        assert_eq!(un("100\\%"), "100%");
+        assert_eq!(un("a\\_b"), "a_b");
+        assert_eq!(un("c\\\\d"), "c\\d");
+        // A `\\` adjacent to a `%` must not be mis-parsed (left-to-right scan):
+        // `\\%` is a literal backslash followed by an unescaped wildcard.
+        assert_eq!(un("\\\\%"), "\\%");
+        // A backslash not introducing an escape stays literal.
+        assert_eq!(un("a\\nb"), "a\\nb");
+        // Round-trips escape_like for arbitrary input, including all metachars.
+        for raw in ["100%", "a_b", "c\\d", "50%_off", "plain", "\\%_\\"] {
+            let esc = escape_like_str(raw);
+            assert_eq!(un(&esc), raw, "round-trip for {raw:?}");
+        }
+        // `escaped` is accepted as an alias for `value`.
+        assert_eq!(
+            op_unescape_like(json!({"escaped": "x\\%y"})).unwrap()["value"],
+            json!("x%y")
+        );
+        assert!(op_unescape_like(json!({})).is_err());
     }
 
     #[test]

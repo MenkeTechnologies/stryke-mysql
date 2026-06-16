@@ -170,6 +170,15 @@ assert_eq MySQL::escape_like("c\\d"), "c\\\\d",     "escape_like: literal backsl
 assert_eq MySQL::escape_like("50%_off"), "50\\%\\_off", "escape_like: both wildcards"
 assert_eq MySQL::escape_like("plain"), "plain",     "escape_like: no metacharacters → unchanged"
 
+# unescape_like: inverse of escape_like.
+assert_eq MySQL::unescape_like("100\\%"), "100%",   "unescape_like: percent decoded"
+assert_eq MySQL::unescape_like("a\\_b"),  "a_b",     "unescape_like: underscore decoded"
+assert_eq MySQL::unescape_like("c\\\\d"), "c\\d",   "unescape_like: doubled backslash → one"
+# Round-trips escape_like for every metacharacter combination.
+for val $raw (q{100%}, q{a_b}, q{c\d}, q{50%_off}, q{plain}) {
+    assert_eq MySQL::unescape_like(MySQL::escape_like($raw)), $raw, "unescape_like: round-trips escape_like($raw)"
+}
+
 # like_pattern: build a LIKE pattern for the common search shapes.
 assert_eq MySQL::like_pattern("foo"), "%foo%",                "like_pattern: contains by default"
 assert_eq MySQL::like_pattern("foo", "starts_with"), "foo%",  "like_pattern: prefix anchor"

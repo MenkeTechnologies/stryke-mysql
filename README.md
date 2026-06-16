@@ -277,6 +277,7 @@ MySQL::parse_qualified_ident($name) → \@parts  # `mydb`.`my table` → ["mydb"
 MySQL::quote_literal($val)  → $quoted     # 'O\'Brien' (backslash-escapes, default mode)
 MySQL::quote($val)          → $quoted     # MySQL QUOTE(): escapes \ ' NUL Ctrl-Z; undef → NULL (unquoted)
 MySQL::escape_like($val)    → $escaped    # backslash-escapes LIKE metachars % _ \ (wrap with quote_literal to inline)
+MySQL::unescape_like($escaped) → $val     # inverse of escape_like: \\ → \, \% → %, \_ → _ (single left-to-right scan)
 MySQL::like_pattern($val, $mode?) → $pattern  # build a LIKE pattern: contains→%v%, starts_with→v%, ends_with→%v, equals→v (term escaped)
 MySQL::unquote_literal($lit) → $val       # 'O\'Brien' → O'Brien; decodes \0\b\n\r\t\Z, keeps \%\_; inverse of quote_literal
 MySQL::format_in_list(\@elems) → $list    # ["a","b"] → ('a','b'); empty → (NULL)

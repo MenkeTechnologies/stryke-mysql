@@ -473,6 +473,13 @@ fn MySQL::escape_like ($value) {
     MySQL::_decode("escape_like", mysql__escape_like(to_json({ value => $value })))->{escaped}
 }
 
+## Decode LIKE escapes (\\ → \, \% → %, \_ → _) back to the literal string —
+## inverse of escape_like. A single left-to-right scan, so a \\ next to a %/_ is
+## handled correctly. Returns the unescaped string.
+fn MySQL::unescape_like ($value) {
+    MySQL::_decode("unescape_like", mysql__unescape_like(to_json({ value => $value })))->{value}
+}
+
 ## Build a LIKE pattern from a literal $value for the common search shapes. The
 ## value's metacharacters are escaped, then wildcards are added per $mode:
 ## contains -> %value%, starts_with/prefix -> value%, ends_with/suffix -> %value,

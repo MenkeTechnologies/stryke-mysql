@@ -1390,6 +1390,62 @@ fn op_enum_index(opts: Value) -> Result<Value> {
     Ok(json!({ "value": value, "index": Value::Null }))
 }
 
+/// Compute the numeric bitmask MySQL stores for a `SET` column value — the SET
+/// analog of `enum_index` (which is for `ENUM`). MySQL stores a SET as a bitmask
+/// where the first member is the low-order bit, so member N contributes
+/// `2^(N-1)` (`SET('a','b','c','d')`: a=1, b=2, c=4, d=8). The `value` is the
+/// comma-separated subset; each part is matched case-insensitively against the
+/// SET definition (a part that isn't a member is an error), duplicates collapse,
+/// and an empty value yields mask 0. opts: `type` (a `set(...)` type, required),
+/// `value` (required). Returns `{value, mask, members}` where `members` is the
+/// matched members in definition order (the canonical SET form). Pure.
+fn op_set_mask(opts: Value) -> Result<Value> {
+    let type_str = opts
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type"))?;
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let parsed = op_parse_enum(json!({ "type": type_str }))?;
+    if parsed["kind"].as_str() != Some("set") {
+        return Err(anyhow!(
+            "not a SET type (use enum_index for ENUM): {type_str}"
+        ));
+    }
+    let members = parsed["values"]
+        .as_array()
+        .ok_or_else(|| anyhow!("could not read set members"))?;
+    if members.len() > 64 {
+        return Err(anyhow!("a SET may have at most 64 members"));
+    }
+    let mut mask: u64 = 0;
+    let trimmed = value.trim();
+    if !trimmed.is_empty() {
+        for part in trimmed.split(',') {
+            let p = part.trim();
+            if p.is_empty() {
+                continue;
+            }
+            match members
+                .iter()
+                .position(|m| m.as_str().is_some_and(|s| s.eq_ignore_ascii_case(p)))
+            {
+                Some(i) => mask |= 1u64 << i,
+                None => return Err(anyhow!("`{p}` is not a member of the SET: {type_str}")),
+            }
+        }
+    }
+    let canonical: Vec<Value> = members
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| mask & (1u64 << i) != 0)
+        .map(|(_, m)| m.clone())
+        .collect();
+    Ok(json!({ "value": value, "mask": mask, "members": canonical }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1610,6 +1666,11 @@ pub extern "C" fn mysql__build_enum(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__enum_index(args: *const c_char) -> *const c_char {
     ffi_call(args, op_enum_index)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__set_mask(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_set_mask)
 }
 
 #[cfg(test)]
@@ -2680,6 +2741,29 @@ mod tests {
         assert!(op_enum_index(json!({ "value": "a" })).is_err());
         assert!(op_enum_index(json!({ "type": "enum('a')" })).is_err());
         assert!(op_enum_index(json!({ "type": "varchar(20)", "value": "a" })).is_err());
+    }
+
+    #[test]
+    fn set_mask_matches_mysql_bitmask_storage() {
+        let m = |ty: &str, v: &str| op_set_mask(json!({ "type": ty, "value": v })).unwrap();
+        let ty = "set('a','b','c','d')";
+        // First member is the low-order bit: a=1, b=2, c=4, d=8.
+        assert_eq!(m(ty, "a")["mask"], json!(1));
+        assert_eq!(m(ty, "d")["mask"], json!(8));
+        // A subset ORs the member bits: a,d → 1 | 8 = 9.
+        let ad = m(ty, "a,d");
+        assert_eq!(ad["mask"], json!(9));
+        // members come back in definition order (canonical), regardless of input order.
+        assert_eq!(m(ty, "d,a")["members"], json!(["a", "d"]));
+        // Whitespace tolerated, case-insensitive, duplicates collapse.
+        assert_eq!(m(ty, " A , c , a ")["mask"], json!(5)); // a|c = 1|4
+                                                            // Empty value → 0; all members → 15.
+        assert_eq!(m(ty, "")["mask"], json!(0));
+        assert_eq!(m(ty, "a,b,c,d")["mask"], json!(15));
+        // Errors: a non-member, an ENUM type (use enum_index), missing args.
+        assert!(op_set_mask(json!({ "type": ty, "value": "z" })).is_err());
+        assert!(op_set_mask(json!({ "type": "enum('a','b')", "value": "a" })).is_err());
+        assert!(op_set_mask(json!({ "type": ty })).is_err());
     }
 
     #[test]

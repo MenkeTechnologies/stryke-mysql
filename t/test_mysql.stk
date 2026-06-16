@@ -250,6 +250,15 @@ assert_eq MySQL::enum_index("enum('Small','Large')", "small")->{index}, 1, "enum
 assert_ok !defined(MySQL::enum_index("enum('a','b')", "c")->{index}), "enum_index: a non-member is undef"
 assert_dies fn { MySQL::enum_index("varchar(20)", "a") }, "enum_index: rejects a non-enum type"
 
+# set_mask: the bitmask MySQL stores for a SET value (member N = 2^(N-1)).
+assert_eq MySQL::set_mask("set('a','b','c','d')", "a")->{mask},   1, "set_mask: first member is the low-order bit"
+assert_eq MySQL::set_mask("set('a','b','c','d')", "d")->{mask},   8, "set_mask: fourth member is bit 3"
+assert_eq MySQL::set_mask("set('a','b','c','d')", "a,d")->{mask}, 9, "set_mask: subset ORs the member bits (1|8)"
+assert_eq MySQL::set_mask("set('a','b','c','d')", "")->{mask},    0, "set_mask: empty value → 0"
+assert_eq join(",", MySQL::set_mask("set('a','b','c','d')", "d,a")->{members}->@*), "a,d", "set_mask: members returned in definition order"
+assert_dies fn { MySQL::set_mask("set('a','b')", "z") },    "set_mask: rejects a non-member"
+assert_dies fn { MySQL::set_mask("enum('a','b')", "a") },   "set_mask: rejects an ENUM type (use enum_index)"
+
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
 test_run

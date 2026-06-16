@@ -537,3 +537,14 @@ fn MySQL::build_enum (%opts) {
 fn MySQL::enum_index ($type, $value) {
     MySQL::_decode("enum_index", mysql__enum_index(to_json({ type => $type, value => $value })))
 }
+
+## The numeric bitmask MySQL stores for a SET $value — the SET analog of
+## enum_index. The first member is the low-order bit, so member N contributes
+## 2^(N-1) (SET('a','b','c','d'): a=1, b=2, c=4, d=8). $value is the
+## comma-separated subset (case-insensitive members, duplicates collapse, empty
+## ⇒ 0); a non-member part is an error; $type must be a set(...). Returns a
+## hashref { value, mask, members } where members is the matched members in
+## definition order (the canonical SET form).
+fn MySQL::set_mask ($type, $value) {
+    MySQL::_decode("set_mask", mysql__set_mask(to_json({ type => $type, value => $value })))
+}

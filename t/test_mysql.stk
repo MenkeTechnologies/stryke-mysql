@@ -149,6 +149,13 @@ assert_eq $rt->{password}, "p\@ss/word", "build_dsn → parse_dsn round-trips @ 
 assert_eq $rt->{database}, "app",        "build_dsn → parse_dsn database"
 
 assert_eq MySQL::quote_ident("weird`col"), "`weird``col`",  "quote_ident uses doubled backticks"
+
+# unquote_ident: inverse of quote_ident (strip backticks, un-double).
+assert_eq MySQL::unquote_ident("`weird``col`"), "weird`col", "unquote_ident: doubled backtick decodes to one"
+assert_eq MySQL::unquote_ident("`plain`"),      "plain",     "unquote_ident: plain quoted name"
+assert_eq MySQL::unquote_ident(MySQL::quote_ident("has space")), "has space", "unquote_ident: round-trips quote_ident"
+assert_dies fn { MySQL::unquote_ident("plain") },   "unquote_ident: rejects an unquoted name"
+assert_dies fn { MySQL::unquote_ident("`a`b`") },   "unquote_ident: rejects an unpaired backtick"
 assert_eq MySQL::quote_literal("O'Brien"), "'O\\'Brien'",   "quote_literal backslash-escapes (default mode)"
 
 # quote: MySQL QUOTE() built-in — like quote_literal but undef → NULL.

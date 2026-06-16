@@ -431,6 +431,13 @@ fn MySQL::quote_ident ($name) {
     MySQL::_decode("quote_ident", mysql__quote_ident(to_json({ name => $name })))->{quoted}
 }
 
+## Decode a backtick-quoted MySQL identifier back to its raw name — inverse of
+## quote_ident (strips the backticks, un-doubles embedded ``). Dies on an
+## unquoted input or an unpaired backtick.
+fn MySQL::unquote_ident ($quoted) {
+    MySQL::_decode("unquote_ident", mysql__unquote_ident(to_json({ quoted => $quoted })))->{name}
+}
+
 ## Quote a dotted, qualified identifier — each "."-separated segment is
 ## backtick-quoted independently and rejoined, so "mydb.my table" →
 ## `mydb`.`my table`. Empty segments (leading/trailing/doubled dot) are rejected.

@@ -271,6 +271,7 @@ MySQL::server_version(%opts) → $server_version # live `SELECT VERSION()`
 MySQL::parse_dsn($dsn)      → { scheme, user, password, host, port, database, params }
 MySQL::build_dsn(%opts)     → $dsn        # parts → URI DSN; inverse of parse_dsn
 MySQL::quote_ident($name)   → $quoted     # `weird``col` (backticks, MySQL style)
+MySQL::unquote_ident($quoted) → $name     # inverse of quote_ident: strip backticks, un-double
 MySQL::quote_qualified_ident($name) → $quoted  # mydb.my table → `mydb`.`my table`
 MySQL::parse_qualified_ident($name) → \@parts  # `mydb`.`my table` → ["mydb","my table"]; inverse of quote_qualified_ident
 MySQL::quote_literal($val)  → $quoted     # 'O\'Brien' (backslash-escapes, default mode)

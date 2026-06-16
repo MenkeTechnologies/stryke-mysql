@@ -280,6 +280,7 @@ MySQL::escape_like($val)    → $escaped    # backslash-escapes LIKE metachars %
 MySQL::like_pattern($val, $mode?) → $pattern  # build a LIKE pattern: contains→%v%, starts_with→v%, ends_with→%v, equals→v (term escaped)
 MySQL::unquote_literal($lit) → $val       # 'O\'Brien' → O'Brien; decodes \0\b\n\r\t\Z, keeps \%\_; inverse of quote_literal
 MySQL::format_in_list(\@elems) → $list    # ["a","b"] → ('a','b'); empty → (NULL)
+MySQL::parse_in_list($list) → { values, count }  # inverse: ('a','b',NULL) → ["a","b",undef]; splits at top-level commas
 ```
 
 ## [0x05] FFI layer

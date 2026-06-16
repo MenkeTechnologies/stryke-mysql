@@ -204,6 +204,18 @@ assert_eq MySQL::format_in_list(["a", "b", "c"]), "('a','b','c')", "format_in_li
 assert_eq MySQL::format_in_list(["O'Brien"]), "('O\\'Brien')",     "format_in_list: MySQL literal escaping"
 assert_eq MySQL::format_in_list([]), "(NULL)",                     "format_in_list: empty → (NULL)"
 
+# parse_in_list: inverse of format_in_list.
+val $pl = MySQL::parse_in_list("('a','b','c')")
+assert_eq $pl->{count}, 3,                              "parse_in_list: element count"
+assert_eq join("|", @{ $pl->{values} }), "a|b|c",       "parse_in_list: values extracted"
+assert_eq join("|", @{ MySQL::parse_in_list("('a,b','c')")->{values} }), "a,b|c", "parse_in_list: comma inside quotes does not split"
+assert_eq MySQL::parse_in_list("('O\\'Brien','x')")->{values}[0], "O'Brien", "parse_in_list: decodes escaped quote"
+assert_ok !defined(MySQL::parse_in_list("('a',NULL,42)")->{values}[1]), "parse_in_list: unquoted NULL → undef"
+assert_eq MySQL::parse_in_list("()")->{count}, 0,       "parse_in_list: empty list"
+# Round-trips format_in_list.
+assert_eq join("|", @{ MySQL::parse_in_list(MySQL::format_in_list(["a,b", "c'd", "x"]))->{values} }), "a,b|c'd|x", "parse_in_list: round-trips format_in_list"
+assert_dies fn { MySQL::parse_in_list("a,b,c") }, "parse_in_list: rejects an unparenthesized list"
+
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
 test_run

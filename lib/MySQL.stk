@@ -495,3 +495,12 @@ fn MySQL::unquote_literal ($value) {
 fn MySQL::format_in_list ($elements) {
     MySQL::_decode("format_in_list", mysql__format_in_list(to_json({ elements => $elements })))->{list}
 }
+
+## Parse an "IN (...)" value list back into an arrayref — inverse of
+## format_in_list. Splits at top-level commas (commas inside quotes ignored);
+## quoted elements are decoded like unquote_literal, an unquoted NULL becomes
+## undef. Note format_in_list renders [] as "(NULL)", so that round-trips to a
+## single undef. Returns a hashref { values, count }.
+fn MySQL::parse_in_list ($list) {
+    MySQL::_decode("parse_in_list", mysql__parse_in_list(to_json({ list => $list })))
+}

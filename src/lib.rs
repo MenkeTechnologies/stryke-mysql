@@ -1112,11 +1112,10 @@ fn op_format_in_list(opts: Value) -> Result<Value> {
 /// backslash (LIKE metacharacters), and any other `\X` collapses to `X`. A
 /// doubled quote (`''` inside a `'`-quoted literal) decodes to one quote.
 /// opts: value (required). Returns `{value}`. Pure.
-fn op_unquote_literal(opts: Value) -> Result<Value> {
-    let input = opts
-        .get("value")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing value"))?;
+/// Decode one MySQL string literal to its raw value (the body of
+/// `unquote_literal`). Shared with `parse_in_list`. See `op_unquote_literal`
+/// for the escape rules.
+fn unquote_literal_str(input: &str) -> Result<String> {
     let mut chars = input.chars();
     let quote = chars
         .next()
@@ -1155,7 +1154,101 @@ fn op_unquote_literal(opts: Value) -> Result<Value> {
             i += 1;
         }
     }
-    Ok(json!({ "value": out }))
+    Ok(out)
+}
+
+fn op_unquote_literal(opts: Value) -> Result<Value> {
+    let input = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    Ok(json!({ "value": unquote_literal_str(input)? }))
+}
+
+/// Split an `IN (...)` body at top-level commas — commas inside a `'`/`"` quoted
+/// element (respecting `\` escapes and doubled quotes) do not split. Used by
+/// `parse_in_list`.
+fn split_in_list_elements(s: &str) -> Result<Vec<String>> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == '\\' && i + 1 < chars.len() {
+                    cur.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                } else if c == q {
+                    if i + 1 < chars.len() && chars[i + 1] == q {
+                        cur.push(q);
+                        i += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                    cur.push(c);
+                } else if c == ',' {
+                    parts.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(c);
+                }
+                i += 1;
+            }
+        }
+    }
+    if quote.is_some() {
+        bail!("unterminated quoted element in IN list");
+    }
+    parts.push(cur);
+    Ok(parts)
+}
+
+/// Parse a MySQL `IN (...)` value list back into its elements — the inverse of
+/// `format_in_list`. The list is split at top-level commas (commas inside a
+/// quoted element are ignored); each element is decoded with `unquote_literal`'s
+/// rules when quoted, an unquoted `NULL` (case-insensitive) becomes a JSON null,
+/// and any other bare token is returned as-is. `format_in_list` renders an empty
+/// list as `(NULL)`, so that round-trips to a single null rather than an empty
+/// list (the sentinel is inherently lossy). opts: `list` (or `value`). Returns
+/// `{values, count}`. Pure.
+fn op_parse_in_list(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("list")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing list"))?;
+    let inner = raw
+        .trim()
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| anyhow!("not a parenthesized IN list: {raw}"))?
+        .trim();
+    if inner.is_empty() {
+        return Ok(json!({ "values": [], "count": 0 }));
+    }
+    let mut values: Vec<Value> = Vec::new();
+    for elem in split_in_list_elements(inner)? {
+        let e = elem.trim();
+        if e.eq_ignore_ascii_case("NULL") {
+            values.push(Value::Null);
+        } else if e.starts_with('\'') || e.starts_with('"') {
+            values.push(Value::String(unquote_literal_str(e)?));
+        } else {
+            values.push(Value::String(e.to_string()));
+        }
+    }
+    let count = values.len();
+    Ok(json!({ "values": values, "count": count }))
 }
 
 // ── exports ─────────────────────────────────────────────────────────────────
@@ -1353,6 +1446,11 @@ pub extern "C" fn mysql__unquote_literal(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__format_in_list(args: *const c_char) -> *const c_char {
     ffi_call(args, op_format_in_list)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__parse_in_list(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_in_list)
 }
 
 #[cfg(test)]
@@ -2259,6 +2357,52 @@ mod tests {
             json!("(NULL)")
         );
         assert!(op_format_in_list(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_in_list_inverts_format_in_list() {
+        // Basic: three quoted strings back to a list.
+        let v = op_parse_in_list(json!({"list": "('a','b','c')"})).unwrap();
+        assert_eq!(v["count"], json!(3));
+        assert_eq!(v["values"], json!(["a", "b", "c"]));
+        // A comma inside a quoted element does not split.
+        assert_eq!(
+            op_parse_in_list(json!({"list": "('a,b','c')"})).unwrap()["values"],
+            json!(["a,b", "c"])
+        );
+        // Escaped quote inside an element decodes; whitespace around commas trims.
+        assert_eq!(
+            op_parse_in_list(json!({"list": "('O\\'Brien', 'x')"})).unwrap()["values"],
+            json!(["O'Brien", "x"])
+        );
+        // An unquoted NULL becomes a JSON null; bare tokens pass through.
+        assert_eq!(
+            op_parse_in_list(json!({"list": "('a',NULL,42)"})).unwrap()["values"],
+            json!(["a", null, "42"])
+        );
+        // `(NULL)` (format_in_list's empty sentinel) parses to a single null.
+        assert_eq!(
+            op_parse_in_list(json!({"list": "(NULL)"})).unwrap()["values"],
+            json!([null])
+        );
+        // `()` is an empty list.
+        assert_eq!(
+            op_parse_in_list(json!({"list": "()"})).unwrap()["count"],
+            json!(0)
+        );
+        // Round-trips format_in_list for ordinary string sets.
+        for set in [vec!["a", "b", "c"], vec!["a,b", "c'd", "x"], vec!["plain"]] {
+            let list = op_format_in_list(json!({ "elements": set })).unwrap()["list"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let parsed = op_parse_in_list(json!({ "list": list })).unwrap();
+            assert_eq!(parsed["values"], json!(set), "round-trip for {set:?}");
+        }
+        // Errors: not parenthesized, unterminated quote, missing.
+        assert!(op_parse_in_list(json!({"list": "a,b,c"})).is_err());
+        assert!(op_parse_in_list(json!({"list": "('unterminated)"})).is_err());
+        assert!(op_parse_in_list(json!({})).is_err());
     }
 
     #[test]

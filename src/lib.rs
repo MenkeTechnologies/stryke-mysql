@@ -1358,6 +1358,38 @@ fn op_build_enum(opts: Value) -> Result<Value> {
     Ok(json!({ "type": type_decl, "kind": kind, "values": values, "count": values.len() }))
 }
 
+/// The 1-based index MySQL assigns to a `value` within an `ENUM`/`SET` `type` —
+/// the internal integer that `ORDER BY` sorts on. Per the MySQL reference: the
+/// listed members are numbered from 1, the empty-string error value `''` is 0,
+/// and a value not in the enumeration is reported as `null` (MySQL would store
+/// `''` on insert, but for a lookup `null` flags "not a member"). Membership is
+/// matched ASCII-case-insensitively, like the default collation. opts: `type`
+/// (an `enum(...)`/`set(...)` declaration) and `value`. Returns `{value, index}`.
+/// Pure.
+fn op_enum_index(opts: Value) -> Result<Value> {
+    let type_str = opts
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type"))?;
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let parsed = op_parse_enum(json!({ "type": type_str }))?;
+    let members = parsed["values"]
+        .as_array()
+        .ok_or_else(|| anyhow!("could not read enum members"))?;
+    if value.is_empty() {
+        return Ok(json!({ "value": value, "index": 0 }));
+    }
+    for (i, m) in members.iter().enumerate() {
+        if m.as_str().is_some_and(|s| s.eq_ignore_ascii_case(value)) {
+            return Ok(json!({ "value": value, "index": i + 1 }));
+        }
+    }
+    Ok(json!({ "value": value, "index": Value::Null }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1573,6 +1605,11 @@ pub extern "C" fn mysql__parse_enum(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__build_enum(args: *const c_char) -> *const c_char {
     ffi_call(args, op_build_enum)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__enum_index(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_enum_index)
 }
 
 #[cfg(test)]
@@ -2617,6 +2654,32 @@ mod tests {
         assert!(op_build_enum(json!({ "values": [1, 2] })).is_err());
         assert!(op_build_enum(json!({ "values": ["a"], "kind": "varchar" })).is_err());
         assert!(op_build_enum(json!({})).is_err());
+    }
+
+    #[test]
+    fn enum_index_matches_mysql_internal_numbering() {
+        let idx = |ty: &str, v: &str| {
+            op_enum_index(json!({ "type": ty, "value": v })).unwrap()["index"].clone()
+        };
+        // Listed members are numbered from 1, in declaration order.
+        assert_eq!(idx("enum('Mercury','Venus','Earth')", "Mercury"), json!(1));
+        assert_eq!(idx("enum('Mercury','Venus','Earth')", "Venus"), json!(2));
+        assert_eq!(idx("enum('Mercury','Venus','Earth')", "Earth"), json!(3));
+        // Declaration order — not lexical — drives the index.
+        assert_eq!(idx("enum('b','a')", "a"), json!(2));
+        assert_eq!(idx("enum('b','a')", "b"), json!(1));
+        // The empty-string error value is index 0.
+        assert_eq!(idx("enum('a','b')", ""), json!(0));
+        // Membership is ASCII case-insensitive (default collation).
+        assert_eq!(idx("enum('Small','Large')", "small"), json!(1));
+        // A value that isn't a member is null (not 0).
+        assert_eq!(idx("enum('a','b')", "c"), Value::Null);
+        // Works for SET types too.
+        assert_eq!(idx("set('x','y','z')", "z"), json!(3));
+        // Missing type/value and a non-enum type error.
+        assert!(op_enum_index(json!({ "value": "a" })).is_err());
+        assert!(op_enum_index(json!({ "type": "enum('a')" })).is_err());
+        assert!(op_enum_index(json!({ "type": "varchar(20)", "value": "a" })).is_err());
     }
 
     #[test]

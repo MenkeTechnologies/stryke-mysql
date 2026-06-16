@@ -529,3 +529,11 @@ fn MySQL::parse_enum ($type) {
 fn MySQL::build_enum (%opts) {
     MySQL::_decode("build_enum", mysql__build_enum(to_json(\%opts)))
 }
+
+## The 1-based index MySQL assigns to $value within an ENUM/SET $type — the
+## internal integer ORDER BY sorts on. Listed members number from 1, the empty
+## string '' is 0, and a value not in the enumeration is undef. Membership is
+## ASCII case-insensitive. Returns a hashref { value, index }.
+fn MySQL::enum_index ($type, $value) {
+    MySQL::_decode("enum_index", mysql__enum_index(to_json({ type => $type, value => $value })))
+}

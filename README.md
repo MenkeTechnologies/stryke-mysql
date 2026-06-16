@@ -284,6 +284,7 @@ MySQL::format_in_list(\@elems) → $list    # ["a","b"] → ('a','b'); empty →
 MySQL::parse_in_list($list) → { values, count }  # inverse: ('a','b',NULL) → ["a","b",undef]; splits at top-level commas
 MySQL::parse_enum($type) → { type, kind, values, count }  # enum('a','b')/set(...) COLUMN_TYPE → member list (kind enum|set)
 MySQL::build_enum(%opts) → { type, kind, values, count }  # inverse: {values=>[...], kind=>enum|set} → ENUM('a','b') type decl (round-trips parse_enum)
+MySQL::enum_index($type, $value) → { value, index }       # MySQL's internal 1-based ENUM index (ORDER BY key); '' → 0, non-member → undef; ASCII case-insensitive
 ```
 
 ## [0x05] FFI layer

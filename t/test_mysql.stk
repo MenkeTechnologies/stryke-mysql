@@ -242,6 +242,14 @@ assert_eq join("|", @{ MySQL::parse_enum(MySQL::build_enum(values => ["it's", "x
 assert_dies fn { MySQL::build_enum(values => []) }, "build_enum: rejects an empty member list"
 assert_dies fn { MySQL::build_enum(values => ["a"], kind => "varchar") }, "build_enum: rejects a non-enum/set kind"
 
+# enum_index: MySQL's internal 1-based ENUM index (what ORDER BY sorts on).
+assert_eq MySQL::enum_index("enum('Mercury','Venus','Earth')", "Venus")->{index}, 2, "enum_index: 1-based, declaration order"
+assert_eq MySQL::enum_index("enum('b','a')", "a")->{index}, 2,  "enum_index: index follows declaration, not lexical order"
+assert_eq MySQL::enum_index("enum('a','b')", "")->{index}, 0,   "enum_index: empty string is the 0 error value"
+assert_eq MySQL::enum_index("enum('Small','Large')", "small")->{index}, 1, "enum_index: ASCII case-insensitive"
+assert_ok !defined(MySQL::enum_index("enum('a','b')", "c")->{index}), "enum_index: a non-member is undef"
+assert_dies fn { MySQL::enum_index("varchar(20)", "a") }, "enum_index: rejects a non-enum type"
+
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
 test_run

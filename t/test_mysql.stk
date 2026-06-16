@@ -170,6 +170,14 @@ assert_eq MySQL::escape_like("c\\d"), "c\\\\d",     "escape_like: literal backsl
 assert_eq MySQL::escape_like("50%_off"), "50\\%\\_off", "escape_like: both wildcards"
 assert_eq MySQL::escape_like("plain"), "plain",     "escape_like: no metacharacters → unchanged"
 
+# like_pattern: build a LIKE pattern for the common search shapes.
+assert_eq MySQL::like_pattern("foo"), "%foo%",                "like_pattern: contains by default"
+assert_eq MySQL::like_pattern("foo", "starts_with"), "foo%",  "like_pattern: prefix anchor"
+assert_eq MySQL::like_pattern("foo", "ends_with"), "%foo",    "like_pattern: suffix anchor"
+assert_eq MySQL::like_pattern("foo", "equals"), "foo",        "like_pattern: exact (escaped, no wildcards)"
+assert_eq MySQL::like_pattern("50%_off"), "%50\\%\\_off%",    "like_pattern: escapes the term's own metacharacters"
+assert_dies fn { MySQL::like_pattern("x", "nope") }, "like_pattern: rejects an unknown mode"
+
 # unquote_literal: inverse of quote_literal + full default-mode escape decoding.
 assert_eq MySQL::unquote_literal("'O\\'Brien'"), "O'Brien", "unquote_literal: inverts quote_literal"
 assert_eq MySQL::unquote_literal(MySQL::quote_literal("a\\b")), "a\\b", "unquote_literal: round-trips backslash"

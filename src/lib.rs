@@ -1041,18 +1041,49 @@ fn op_quote(opts: Value) -> Result<Value> {
 /// is `\`). This is the LIKE-pattern level only — wrap the result with
 /// `quote_literal` to inline it as a string (which adds the separate SQL-literal
 /// backslash doubling). opts: `value` (required). Returns `{escaped}`. Pure.
+/// Escape the LIKE metacharacters in `value` (backslash first so the `%`/`_`
+/// escapes it adds aren't themselves doubled). Shared by `escape_like` and
+/// `like_pattern`.
+fn escape_like_str(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn op_escape_like(opts: Value) -> Result<Value> {
     let value = opts
         .get("value")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing value"))?;
-    // Escape the backslash first so the `%`/`_` escapes it then adds aren't
-    // themselves doubled.
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    Ok(json!({ "escaped": escaped }))
+    Ok(json!({ "escaped": escape_like_str(value) }))
+}
+
+/// Build a MySQL `LIKE` pattern from a literal substring for the common
+/// search-box shapes. The substring's LIKE metacharacters (`\`, `%`, `_`) are
+/// escaped (as `escape_like` does), then wildcards are added per `mode`:
+/// `contains` → `%value%`, `starts_with`/`prefix` → `value%`,
+/// `ends_with`/`suffix` → `%value`, `equals`/`exact` → `value` (escaped, no
+/// wildcards). Wrap the result with `quote_literal` to inline it. opts: `value`
+/// (required), `mode` (default `contains`). Returns `{pattern, mode}`. Pure.
+fn op_like_pattern(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let mode = opts
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("contains");
+    let esc = escape_like_str(value);
+    let pattern = match mode {
+        "contains" => format!("%{esc}%"),
+        "starts_with" | "prefix" => format!("{esc}%"),
+        "ends_with" | "suffix" => format!("%{esc}"),
+        "equals" | "exact" => esc,
+        other => bail!("unknown mode `{other}` (contains|starts_with|ends_with|equals)"),
+    };
+    Ok(json!({ "pattern": pattern, "mode": mode }))
 }
 
 /// Build a parenthesized, quoted `IN (...)` value list from a list of string
@@ -1307,6 +1338,11 @@ pub extern "C" fn mysql__quote(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__escape_like(args: *const c_char) -> *const c_char {
     ffi_call(args, op_escape_like)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__like_pattern(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_like_pattern)
 }
 
 #[no_mangle]
@@ -2139,6 +2175,36 @@ mod tests {
             json!("plain")
         );
         assert!(op_escape_like(json!({})).is_err());
+    }
+
+    #[test]
+    fn like_pattern_anchors_an_escaped_substring_per_mode() {
+        let pat = |v: &str, m: Option<&str>| {
+            let mut o = json!({ "value": v });
+            if let Some(m) = m {
+                o["mode"] = json!(m);
+            }
+            op_like_pattern(o).unwrap()["pattern"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Default mode is `contains`.
+        assert_eq!(pat("foo", None), "%foo%");
+        assert_eq!(pat("foo", Some("contains")), "%foo%");
+        assert_eq!(pat("foo", Some("starts_with")), "foo%");
+        assert_eq!(pat("foo", Some("prefix")), "foo%");
+        assert_eq!(pat("foo", Some("ends_with")), "%foo");
+        assert_eq!(pat("foo", Some("suffix")), "%foo");
+        assert_eq!(pat("foo", Some("equals")), "foo");
+        assert_eq!(pat("foo", Some("exact")), "foo");
+        // The substring's own LIKE metacharacters are escaped before anchoring,
+        // so a literal `%`/`_` in the search term doesn't become a wildcard.
+        assert_eq!(pat("50%_off", Some("contains")), "%50\\%\\_off%");
+        assert_eq!(pat("c\\d", Some("equals")), "c\\\\d");
+        // Unknown mode and missing value reject.
+        assert!(op_like_pattern(json!({"value": "x", "mode": "nope"})).is_err());
+        assert!(op_like_pattern(json!({})).is_err());
     }
 
     #[test]

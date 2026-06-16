@@ -473,6 +473,14 @@ fn MySQL::escape_like ($value) {
     MySQL::_decode("escape_like", mysql__escape_like(to_json({ value => $value })))->{escaped}
 }
 
+## Build a LIKE pattern from a literal $value for the common search shapes. The
+## value's metacharacters are escaped, then wildcards are added per $mode:
+## contains -> %value%, starts_with/prefix -> value%, ends_with/suffix -> %value,
+## equals/exact -> value. Default mode is contains. Returns the pattern string.
+fn MySQL::like_pattern ($value, $mode = "contains") {
+    MySQL::_decode("like_pattern", mysql__like_pattern(to_json({ value => $value, mode => $mode })))->{pattern}
+}
+
 ## Decode a MySQL string literal back to its raw value — inverse of
 ## quote_literal. Handles the default-mode backslash escapes (\0 \b \n \r \t \Z
 ## \' \" \\), keeps \% and \_ (LIKE metacharacters), and collapses doubled

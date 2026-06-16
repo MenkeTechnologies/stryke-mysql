@@ -1446,6 +1446,54 @@ fn op_set_mask(opts: Value) -> Result<Value> {
     Ok(json!({ "value": value, "mask": mask, "members": canonical }))
 }
 
+/// Decode the numeric bitmask MySQL stores for a `SET` column back to its
+/// members — the inverse of `set_mask`. The first member is the low-order bit
+/// (member N is `2^(N-1)`), so each set bit selects the member at that ordinal;
+/// the members come out in definition order, joined by commas into the canonical
+/// SET value. A bit set beyond the SET's defined members is an error. opts:
+/// `type` (a `set(...)` type, required), `mask` (a non-negative integer,
+/// required). Returns `{mask, value, members}`. Pure.
+fn op_set_from_mask(opts: Value) -> Result<Value> {
+    let type_str = opts
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type"))?;
+    let mask = opts
+        .get("mask")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing mask (a non-negative integer)"))?;
+    let parsed = op_parse_enum(json!({ "type": type_str }))?;
+    if parsed["kind"].as_str() != Some("set") {
+        return Err(anyhow!(
+            "not a SET type (use enum_index for ENUM): {type_str}"
+        ));
+    }
+    let members = parsed["values"]
+        .as_array()
+        .ok_or_else(|| anyhow!("could not read set members"))?;
+    let n = members.len();
+    if n > 64 {
+        return Err(anyhow!("a SET may have at most 64 members"));
+    }
+    if n < 64 && mask >= (1u64 << n) {
+        return Err(anyhow!(
+            "mask {mask} has a bit set beyond the SET's {n} members: {type_str}"
+        ));
+    }
+    let selected: Vec<Value> = members
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| mask & (1u64 << i) != 0)
+        .map(|(_, m)| m.clone())
+        .collect();
+    let value = selected
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(json!({ "mask": mask, "value": value, "members": selected }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1671,6 +1719,11 @@ pub extern "C" fn mysql__enum_index(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__set_mask(args: *const c_char) -> *const c_char {
     ffi_call(args, op_set_mask)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__set_from_mask(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_set_from_mask)
 }
 
 #[cfg(test)]
@@ -2764,6 +2817,31 @@ mod tests {
         assert!(op_set_mask(json!({ "type": ty, "value": "z" })).is_err());
         assert!(op_set_mask(json!({ "type": "enum('a','b')", "value": "a" })).is_err());
         assert!(op_set_mask(json!({ "type": ty })).is_err());
+    }
+
+    #[test]
+    fn set_from_mask_inverts_set_mask() {
+        let ty = "set('a','b','c','d')";
+        let f = |mask: u64| op_set_from_mask(json!({ "type": ty, "mask": mask })).unwrap();
+        // Each bit selects the member at that ordinal, in definition order.
+        assert_eq!(f(1)["value"], json!("a"));
+        assert_eq!(f(8)["value"], json!("d"));
+        assert_eq!(f(9)["value"], json!("a,d"), "1 | 8 = 9");
+        assert_eq!(f(5)["members"], json!(["a", "c"]));
+        // Empty mask → empty SET; all bits → all members.
+        assert_eq!(f(0)["value"], json!(""));
+        assert_eq!(f(15)["value"], json!("a,b,c,d"));
+        // Round-trips set_mask.
+        for v in ["", "a", "a,d", "b,c", "a,b,c,d"] {
+            let mask = op_set_mask(json!({ "type": ty, "value": v })).unwrap()["mask"]
+                .as_u64()
+                .unwrap();
+            assert_eq!(f(mask)["value"], json!(v), "round-trip `{v}`");
+        }
+        // A bit beyond the 4 members, an ENUM type, and missing args all error.
+        assert!(op_set_from_mask(json!({ "type": ty, "mask": 16 })).is_err());
+        assert!(op_set_from_mask(json!({ "type": "enum('a','b')", "mask": 1 })).is_err());
+        assert!(op_set_from_mask(json!({ "type": ty })).is_err());
     }
 
     #[test]

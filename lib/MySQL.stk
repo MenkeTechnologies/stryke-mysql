@@ -548,3 +548,13 @@ fn MySQL::enum_index ($type, $value) {
 fn MySQL::set_mask ($type, $value) {
     MySQL::_decode("set_mask", mysql__set_mask(to_json({ type => $type, value => $value })))
 }
+
+## Decode the numeric bitmask MySQL stores for a SET column ($mask) back to its
+## members — the inverse of set_mask. The first member is the low-order bit, so
+## each set bit selects the member at that ordinal; members come out in
+## definition order joined into the canonical SET $value. A bit set beyond the
+## SET's members is an error; $type must be a set(...). Returns a hashref
+## { mask, value, members }.
+fn MySQL::set_from_mask ($type, $mask) {
+    MySQL::_decode("set_from_mask", mysql__set_from_mask(to_json({ type => $type, mask => $mask })))
+}

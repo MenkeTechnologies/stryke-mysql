@@ -259,6 +259,13 @@ assert_eq join(",", MySQL::set_mask("set('a','b','c','d')", "d,a")->{members}->@
 assert_dies fn { MySQL::set_mask("set('a','b')", "z") },    "set_mask: rejects a non-member"
 assert_dies fn { MySQL::set_mask("enum('a','b')", "a") },   "set_mask: rejects an ENUM type (use enum_index)"
 
+# set_from_mask: decode a stored SET bitmask back to members (inverse of set_mask).
+assert_eq MySQL::set_from_mask("set('a','b','c','d')", 9)->{value}, "a,d", "set_from_mask: 9 = bits 0+3 → a,d"
+assert_eq MySQL::set_from_mask("set('a','b','c','d')", 0)->{value}, "",    "set_from_mask: 0 → empty SET"
+assert_eq join(",", MySQL::set_from_mask("set('a','b','c','d')", 5)->{members}->@*), "a,c", "set_from_mask: members in definition order"
+assert_eq MySQL::set_from_mask("set('a','b','c','d')", MySQL::set_mask("set('a','b','c','d')", "b,c")->{mask})->{value}, "b,c", "set_from_mask: round-trips set_mask"
+assert_dies fn { MySQL::set_from_mask("set('a','b')", 16) },  "set_from_mask: rejects a bit beyond the members"
+assert_dies fn { MySQL::set_from_mask("enum('a','b')", 1) },  "set_from_mask: rejects an ENUM type"
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
 test_run

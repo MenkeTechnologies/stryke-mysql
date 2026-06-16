@@ -78,5 +78,6 @@ assert_ok exists &MySQL::parse_enum, "MySQL::parse_enum exists"
 assert_ok exists &MySQL::build_enum, "MySQL::build_enum exists"
 assert_ok exists &MySQL::enum_index, "MySQL::enum_index exists"
 assert_ok exists &MySQL::set_mask, "MySQL::set_mask exists"
+assert_ok exists &MySQL::set_from_mask, "MySQL::set_from_mask exists"
 
 test_run

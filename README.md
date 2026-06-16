@@ -282,6 +282,7 @@ MySQL::like_pattern($val, $mode?) → $pattern  # build a LIKE pattern: contains
 MySQL::unquote_literal($lit) → $val       # 'O\'Brien' → O'Brien; decodes \0\b\n\r\t\Z, keeps \%\_; inverse of quote_literal
 MySQL::format_in_list(\@elems) → $list    # ["a","b"] → ('a','b'); empty → (NULL)
 MySQL::parse_in_list($list) → { values, count }  # inverse: ('a','b',NULL) → ["a","b",undef]; splits at top-level commas
+MySQL::parse_enum($type) → { type, kind, values, count }  # enum('a','b')/set(...) COLUMN_TYPE → member list (kind enum|set)
 ```
 
 ## [0x05] FFI layer

@@ -1280,6 +1280,48 @@ fn op_parse_in_list(opts: Value) -> Result<Value> {
     Ok(json!({ "values": values, "count": count }))
 }
 
+/// Parse a MySQL `ENUM(...)` / `SET(...)` column type into its member values —
+/// the `information_schema.COLUMNS.COLUMN_TYPE` form (e.g. `enum('small','large')`
+/// or `set('a','b')`). Members are single-quoted with embedded quotes doubled
+/// (`''`) and MySQL backslash escapes, both decoded here by the same literal
+/// parsing `parse_in_list` uses. The `enum`/`set` keyword is case-insensitive.
+/// opts: `type` (or `value`, required). Returns `{type, kind, values, count}`.
+/// Pure.
+fn op_parse_enum(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("type")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type"))?;
+    let s = raw.trim();
+    let lower = s.to_ascii_lowercase();
+    let (kind, plen) = if lower.starts_with("enum(") {
+        ("enum", 5)
+    } else if lower.starts_with("set(") {
+        ("set", 4)
+    } else {
+        return Err(anyhow!(
+            "not an enum/set type (want enum(...) or set(...)): {raw}"
+        ));
+    };
+    let inner = s[plen..]
+        .strip_suffix(')')
+        .ok_or_else(|| anyhow!("unterminated {kind}(...): {raw}"))?
+        .trim();
+    let mut values: Vec<Value> = Vec::new();
+    if !inner.is_empty() {
+        for elem in split_in_list_elements(inner)? {
+            let e = elem.trim();
+            if !(e.starts_with('\'') || e.starts_with('"')) {
+                return Err(anyhow!("enum/set member must be a quoted string: {e}"));
+            }
+            values.push(Value::String(unquote_literal_str(e)?));
+        }
+    }
+    let count = values.len();
+    Ok(json!({ "type": raw, "kind": kind, "values": values, "count": count }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1485,6 +1527,11 @@ pub extern "C" fn mysql__format_in_list(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__parse_in_list(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_in_list)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__parse_enum(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_enum)
 }
 
 #[cfg(test)]
@@ -2467,6 +2514,38 @@ mod tests {
         assert!(op_parse_in_list(json!({"list": "a,b,c"})).is_err());
         assert!(op_parse_in_list(json!({"list": "('unterminated)"})).is_err());
         assert!(op_parse_in_list(json!({})).is_err());
+    }
+
+    #[test]
+    fn parse_enum_extracts_members_from_column_type() {
+        // ENUM members.
+        let e = op_parse_enum(json!({"type": "enum('small','medium','large')"})).unwrap();
+        assert_eq!(e["kind"], json!("enum"));
+        assert_eq!(e["values"], json!(["small", "medium", "large"]));
+        assert_eq!(e["count"], json!(3));
+        // SET members, and the keyword is case-insensitive.
+        let s = op_parse_enum(json!({"type": "SET('a','b')"})).unwrap();
+        assert_eq!(s["kind"], json!("set"));
+        assert_eq!(s["values"], json!(["a", "b"]));
+        // A doubled quote inside a member decodes to one (information_schema form).
+        assert_eq!(
+            op_parse_enum(json!({"type": "enum('it''s','x')"})).unwrap()["values"],
+            json!(["it's", "x"])
+        );
+        // A comma inside a member does not split it.
+        assert_eq!(
+            op_parse_enum(json!({"type": "enum('a,b','c')"})).unwrap()["values"],
+            json!(["a,b", "c"])
+        );
+        // `value` alias.
+        assert_eq!(
+            op_parse_enum(json!({"value": "enum('y')"})).unwrap()["values"],
+            json!(["y"])
+        );
+        // Errors: not an enum/set, unterminated, missing.
+        assert!(op_parse_enum(json!({"type": "varchar(20)"})).is_err());
+        assert!(op_parse_enum(json!({"type": "enum('a'"})).is_err());
+        assert!(op_parse_enum(json!({})).is_err());
     }
 
     #[test]

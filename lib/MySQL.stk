@@ -511,3 +511,12 @@ fn MySQL::format_in_list ($elements) {
 fn MySQL::parse_in_list ($list) {
     MySQL::_decode("parse_in_list", mysql__parse_in_list(to_json({ list => $list })))
 }
+
+## Parse a MySQL ENUM(...)/SET(...) column type into its member values — the
+## information_schema COLUMN_TYPE form (e.g. enum('small','large')). Members are
+## single-quoted with embedded quotes doubled ('') and MySQL backslash escapes,
+## both decoded. The enum/set keyword is case-insensitive. Returns a hashref
+## { type, kind, values, count }.
+fn MySQL::parse_enum ($type) {
+    MySQL::_decode("parse_enum", mysql__parse_enum(to_json({ type => $type })))
+}

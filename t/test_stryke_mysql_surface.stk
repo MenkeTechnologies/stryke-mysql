@@ -75,5 +75,6 @@ assert_ok exists &MySQL::unquote_literal, "MySQL::unquote_literal exists"
 assert_ok exists &MySQL::format_in_list, "MySQL::format_in_list exists"
 assert_ok exists &MySQL::parse_in_list, "MySQL::parse_in_list exists"
 assert_ok exists &MySQL::parse_enum, "MySQL::parse_enum exists"
+assert_ok exists &MySQL::build_enum, "MySQL::build_enum exists"
 
 test_run

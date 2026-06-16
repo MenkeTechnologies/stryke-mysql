@@ -1322,6 +1322,42 @@ fn op_parse_enum(opts: Value) -> Result<Value> {
     Ok(json!({ "type": raw, "kind": kind, "values": values, "count": count }))
 }
 
+/// Build a MySQL `ENUM(...)`/`SET(...)` column type from a list of member values
+/// — the inverse of `parse_enum`. Each member is quoted as a SQL string literal
+/// (reusing `quote_literal_str`, so embedded `'`/`\` are escaped), the keyword is
+/// upper-cased (`ENUM`/`SET`), and the list must be non-empty (an empty
+/// `ENUM()`/`SET()` is invalid MySQL). `parse_enum` round-trips the result. opts:
+/// `values` (non-empty array of strings, required), `kind` (`enum` default, or
+/// `set`). Returns `{type, kind, values, count}`. Pure.
+fn op_build_enum(opts: Value) -> Result<Value> {
+    let kind = opts
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("enum")
+        .to_ascii_lowercase();
+    let keyword = match kind.as_str() {
+        "enum" => "ENUM",
+        "set" => "SET",
+        other => return Err(anyhow!("kind must be `enum` or `set`, got `{other}`")),
+    };
+    let values = opts
+        .get("values")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing values (array of strings)"))?;
+    if values.is_empty() {
+        return Err(anyhow!("{kind} needs at least one value"));
+    }
+    let mut members = Vec::with_capacity(values.len());
+    for v in values {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("every value must be a string"))?;
+        members.push(quote_literal_str(s));
+    }
+    let type_decl = format!("{keyword}({})", members.join(","));
+    Ok(json!({ "type": type_decl, "kind": kind, "values": values, "count": values.len() }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1532,6 +1568,11 @@ pub extern "C" fn mysql__parse_in_list(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__parse_enum(args: *const c_char) -> *const c_char {
     ffi_call(args, op_parse_enum)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__build_enum(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_enum)
 }
 
 #[cfg(test)]
@@ -2546,6 +2587,36 @@ mod tests {
         assert!(op_parse_enum(json!({"type": "varchar(20)"})).is_err());
         assert!(op_parse_enum(json!({"type": "enum('a'"})).is_err());
         assert!(op_parse_enum(json!({})).is_err());
+    }
+
+    #[test]
+    fn build_enum_inverts_parse_enum() {
+        // Default kind is ENUM; members are single-quoted.
+        let e = op_build_enum(json!({ "values": ["small", "medium", "large"] })).unwrap();
+        assert_eq!(e["type"], json!("ENUM('small','medium','large')"));
+        assert_eq!(e["kind"], json!("enum"));
+        assert_eq!(e["count"], json!(3));
+        // SET keyword.
+        assert_eq!(
+            op_build_enum(json!({ "values": ["a", "b"], "kind": "set" })).unwrap()["type"],
+            json!("SET('a','b')")
+        );
+        // Embedded quote/backslash are escaped and round-trip through parse_enum.
+        for vals in [
+            json!(["small", "medium", "large"]),
+            json!(["it's", "x"]),
+            json!(["a,b", "c"]),
+            json!(["back\\slash"]),
+        ] {
+            let built = op_build_enum(json!({ "values": vals })).unwrap();
+            let parsed = op_parse_enum(json!({ "type": built["type"] })).unwrap();
+            assert_eq!(parsed["values"], vals, "round-trip {vals}");
+        }
+        // Errors: empty list, non-string member, bad kind, missing values.
+        assert!(op_build_enum(json!({ "values": [] })).is_err());
+        assert!(op_build_enum(json!({ "values": [1, 2] })).is_err());
+        assert!(op_build_enum(json!({ "values": ["a"], "kind": "varchar" })).is_err());
+        assert!(op_build_enum(json!({})).is_err());
     }
 
     #[test]

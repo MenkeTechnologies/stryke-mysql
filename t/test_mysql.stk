@@ -235,6 +235,13 @@ assert_eq MySQL::parse_enum("enum('it''s','x')")->{values}[0], "it's", "parse_en
 assert_eq join("|", @{ MySQL::parse_enum("enum('a,b','c')")->{values} }), "a,b|c", "parse_enum: comma inside a member does not split"
 assert_dies fn { MySQL::parse_enum("varchar(20)") }, "parse_enum: rejects a non-enum type"
 
+# build_enum: inverse of parse_enum.
+assert_eq MySQL::build_enum(values => ["small", "medium", "large"])->{type}, "ENUM('small','medium','large')", "build_enum: ENUM keyword + quoted members"
+assert_eq MySQL::build_enum(values => ["a", "b"], kind => "set")->{type}, "SET('a','b')", "build_enum: SET keyword"
+assert_eq join("|", @{ MySQL::parse_enum(MySQL::build_enum(values => ["it's", "x"])->{type})->{values} }), "it's|x", "build_enum: embedded quote round-trips through parse_enum"
+assert_dies fn { MySQL::build_enum(values => []) }, "build_enum: rejects an empty member list"
+assert_dies fn { MySQL::build_enum(values => ["a"], kind => "varchar") }, "build_enum: rejects a non-enum/set kind"
+
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
 test_run

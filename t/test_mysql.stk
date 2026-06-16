@@ -151,6 +151,11 @@ assert_eq $rt->{database}, "app",        "build_dsn → parse_dsn database"
 assert_eq MySQL::quote_ident("weird`col"), "`weird``col`",  "quote_ident uses doubled backticks"
 assert_eq MySQL::quote_literal("O'Brien"), "'O\\'Brien'",   "quote_literal backslash-escapes (default mode)"
 
+# quote: MySQL QUOTE() built-in — like quote_literal but undef → NULL.
+assert_eq MySQL::quote("O'Brien"), "'O\\'Brien'", "quote: backslash-escapes like quote_literal"
+assert_eq MySQL::quote(undef),     "NULL",        "quote: undef → unquoted NULL"
+assert_eq MySQL::quote(),          "NULL",        "quote: no argument → NULL"
+
 # escape_like: backslash-prefix the LIKE metacharacters % _ \.
 assert_eq MySQL::escape_like("100%"), "100\\%",     "escape_like: percent escaped"
 assert_eq MySQL::escape_like("a_b"),  "a\\_b",      "escape_like: underscore escaped"

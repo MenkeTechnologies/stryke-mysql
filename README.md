@@ -274,6 +274,7 @@ MySQL::quote_ident($name)   → $quoted     # `weird``col` (backticks, MySQL sty
 MySQL::quote_qualified_ident($name) → $quoted  # mydb.my table → `mydb`.`my table`
 MySQL::parse_qualified_ident($name) → \@parts  # `mydb`.`my table` → ["mydb","my table"]; inverse of quote_qualified_ident
 MySQL::quote_literal($val)  → $quoted     # 'O\'Brien' (backslash-escapes, default mode)
+MySQL::quote($val)          → $quoted     # MySQL QUOTE(): escapes \ ' NUL Ctrl-Z; undef → NULL (unquoted)
 MySQL::escape_like($val)    → $escaped    # backslash-escapes LIKE metachars % _ \ (wrap with quote_literal to inline)
 MySQL::unquote_literal($lit) → $val       # 'O\'Brien' → O'Brien; decodes \0\b\n\r\t\Z, keeps \%\_; inverse of quote_literal
 MySQL::format_in_list(\@elems) → $list    # ["a","b"] → ('a','b'); empty → (NULL)
@@ -290,7 +291,7 @@ query/introspection surface (`mysql__pkg_version`, `mysql__version`,
 `mysql__query`, `mysql__execute`, `mysql__insert_many`, `mysql__dump`, …)
 plus connection-free helpers (`mysql__parse_dsn`, `mysql__build_dsn`,
 `mysql__quote_ident`, `mysql__quote_qualified_ident`,
-`mysql__quote_literal`, `mysql__format_in_list`). The authoritative list is
+`mysql__quote_literal`, `mysql__quote`, `mysql__format_in_list`). The authoritative list is
 `[ffi].exports` in `stryke.toml`.
 
 A `mysql::Pool` cache keyed by connection URL is held in `OnceCell`,

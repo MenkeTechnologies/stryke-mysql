@@ -988,6 +988,30 @@ fn op_quote_literal(opts: Value) -> Result<Value> {
     Ok(json!({"quoted": quote_literal_str(value)}))
 }
 
+/// MySQL's `QUOTE()` built-in: quote a value for safe SQL inlining, escaping
+/// each backslash, single quote, ASCII NUL (`\0`), and Control-Z (`\Z`) with a
+/// backslash and wrapping in single quotes; a NULL (absent or null `value`)
+/// returns the unquoted word `NULL`. Stricter than `quote_literal`, which omits
+/// the NUL/Ctrl-Z escapes and the NULL handling. opts: `value` (string or
+/// null). Returns `{quoted}`. Pure.
+fn op_quote(opts: Value) -> Result<Value> {
+    match opts.get("value") {
+        None | Some(Value::Null) => Ok(json!({"quoted": "NULL"})),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| anyhow!("value must be a string or null"))?;
+            // Backslash first so the escapes added below aren't re-doubled.
+            let escaped = s
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\0', "\\0")
+                .replace('\u{1a}', "\\Z");
+            Ok(json!({"quoted": format!("'{escaped}'")}))
+        }
+    }
+}
+
 /// Escape the LIKE metacharacters in a value so it matches literally in a `LIKE`
 /// clause: each `\`, `%`, and `_` is backslash-prefixed (the default LIKE escape
 /// is `\`). This is the LIKE-pattern level only — wrap the result with
@@ -1244,6 +1268,11 @@ pub extern "C" fn mysql__parse_qualified_ident(args: *const c_char) -> *const c_
 #[no_mangle]
 pub extern "C" fn mysql__quote_literal(args: *const c_char) -> *const c_char {
     ffi_call(args, op_quote_literal)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__quote(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quote)
 }
 
 #[no_mangle]
@@ -2000,6 +2029,28 @@ mod tests {
             op_quote_literal(json!({"value": "a\\b"})).unwrap()["quoted"],
             json!("'a\\\\b'")
         );
+    }
+
+    #[test]
+    fn quote_matches_mysql_quote_builtin() {
+        // Same backslash escaping as quote_literal for the common chars.
+        assert_eq!(
+            op_quote(json!({"value": "O'Brien"})).unwrap()["quoted"],
+            json!("'O\\'Brien'")
+        );
+        // NUL and Control-Z get the \0 / \Z escapes that quote_literal omits.
+        assert_eq!(
+            op_quote(json!({"value": "a\u{0}b\u{1a}c"})).unwrap()["quoted"],
+            json!("'a\\0b\\Zc'")
+        );
+        // NULL (json null or absent) → the unquoted word NULL.
+        assert_eq!(
+            op_quote(json!({ "value": Value::Null })).unwrap()["quoted"],
+            json!("NULL")
+        );
+        assert_eq!(op_quote(json!({})).unwrap()["quoted"], json!("NULL"));
+        // A non-string, non-null value is rejected.
+        assert!(op_quote(json!({"value": 7})).is_err());
     }
 
     #[test]

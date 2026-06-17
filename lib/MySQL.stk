@@ -538,6 +538,15 @@ fn MySQL::enum_index ($type, $value) {
     MySQL::_decode("enum_index", mysql__enum_index(to_json({ type => $type, value => $value })))
 }
 
+## The ENUM member at a 1-based $index — the inverse of enum_index, and the lookup
+## MySQL does when reading the integer it stores for an ENUM column. Index 0 is the
+## empty-string error value '', index N is the Nth member in definition order, and
+## an out-of-range index (negative or past the last member) is undef. Returns a
+## hashref { index, value }.
+fn MySQL::enum_value ($type, $index) {
+    MySQL::_decode("enum_value", mysql__enum_value(to_json({ type => $type, index => $index })))
+}
+
 ## The numeric bitmask MySQL stores for a SET $value — the SET analog of
 ## enum_index. The first member is the low-order bit, so member N contributes
 ## 2^(N-1) (SET('a','b','c','d'): a=1, b=2, c=4, d=8). $value is the

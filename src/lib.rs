@@ -1390,6 +1390,36 @@ fn op_enum_index(opts: Value) -> Result<Value> {
     Ok(json!({ "value": value, "index": Value::Null }))
 }
 
+/// The `ENUM` member at a 1-based `index` — the inverse of enum_index, and the
+/// lookup MySQL does when reading the integer it stores for an ENUM column. Index
+/// `0` is the empty-string error value (`""`); index N is the Nth member in
+/// definition order; an out-of-range index (negative or past the member count)
+/// yields `null`. `enum_value(t, enum_index(t, v).index) == v` for a real member.
+/// opts: `type` (the `ENUM(...)` definition), `index` (required). Returns
+/// `{index, value}`. Pure.
+fn op_enum_value(opts: Value) -> Result<Value> {
+    let type_str = opts
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type"))?;
+    let index = opts
+        .get("index")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("missing index (1-based)"))?;
+    let parsed = op_parse_enum(json!({ "type": type_str }))?;
+    let members = parsed["values"]
+        .as_array()
+        .ok_or_else(|| anyhow!("could not read enum members"))?;
+    let value = if index == 0 {
+        json!("")
+    } else if index >= 1 && (index as usize) <= members.len() {
+        members[index as usize - 1].clone()
+    } else {
+        Value::Null
+    };
+    Ok(json!({ "index": index, "value": value }))
+}
+
 /// Compute the numeric bitmask MySQL stores for a `SET` column value — the SET
 /// analog of `enum_index` (which is for `ENUM`). MySQL stores a SET as a bitmask
 /// where the first member is the low-order bit, so member N contributes
@@ -1714,6 +1744,11 @@ pub extern "C" fn mysql__build_enum(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__enum_index(args: *const c_char) -> *const c_char {
     ffi_call(args, op_enum_index)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__enum_value(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_enum_value)
 }
 
 #[no_mangle]
@@ -2794,6 +2829,36 @@ mod tests {
         assert!(op_enum_index(json!({ "value": "a" })).is_err());
         assert!(op_enum_index(json!({ "type": "enum('a')" })).is_err());
         assert!(op_enum_index(json!({ "type": "varchar(20)", "value": "a" })).is_err());
+    }
+
+    #[test]
+    fn enum_value_inverts_enum_index() {
+        let val = |ty: &str, i: i64| {
+            op_enum_value(json!({ "type": ty, "index": i })).unwrap()["value"].clone()
+        };
+        let ty = "enum('Mercury','Venus','Earth')";
+        // 1-based lookup in declaration order.
+        assert_eq!(val(ty, 1), json!("Mercury"));
+        assert_eq!(val(ty, 2), json!("Venus"));
+        assert_eq!(val(ty, 3), json!("Earth"));
+        // Index 0 is the empty-string error value.
+        assert_eq!(val(ty, 0), json!(""));
+        // Out-of-range (past the last member, or negative) is null.
+        assert_eq!(val(ty, 4), Value::Null);
+        assert_eq!(val(ty, -1), Value::Null);
+        // Round-trips enum_index for every real member.
+        for v in ["Mercury", "Venus", "Earth"] {
+            let i = op_enum_index(json!({ "type": ty, "value": v })).unwrap()["index"]
+                .as_i64()
+                .unwrap();
+            assert_eq!(val(ty, i), json!(v), "round-trip for {v}");
+        }
+        // Works for SET types and reports the same member ordering.
+        assert_eq!(val("set('x','y','z')", 3), json!("z"));
+        // Missing type/index and a non-enum type error.
+        assert!(op_enum_value(json!({ "index": 1 })).is_err());
+        assert!(op_enum_value(json!({ "type": ty })).is_err());
+        assert!(op_enum_value(json!({ "type": "varchar(20)", "index": 1 })).is_err());
     }
 
     #[test]

@@ -250,6 +250,13 @@ assert_eq MySQL::enum_index("enum('Small','Large')", "small")->{index}, 1, "enum
 assert_ok !defined(MySQL::enum_index("enum('a','b')", "c")->{index}), "enum_index: a non-member is undef"
 assert_dies fn { MySQL::enum_index("varchar(20)", "a") }, "enum_index: rejects a non-enum type"
 
+# enum_value: inverse of enum_index (1-based index → member).
+assert_eq MySQL::enum_value("enum('Mercury','Venus','Earth')", 2)->{value}, "Venus", "enum_value: 1-based lookup in declaration order"
+assert_eq MySQL::enum_value("enum('a','b')", 0)->{value}, "", "enum_value: index 0 is the empty-string error value"
+assert_ok !defined(MySQL::enum_value("enum('a','b')", 5)->{value}), "enum_value: out-of-range index is undef"
+assert_eq MySQL::enum_value("enum('Mercury','Venus','Earth')", MySQL::enum_index("enum('Mercury','Venus','Earth')", "Earth")->{index})->{value}, "Earth", "enum_value: round-trips enum_index"
+assert_dies fn { MySQL::enum_value("varchar(20)", 1) }, "enum_value: rejects a non-enum type"
+
 # set_mask: the bitmask MySQL stores for a SET value (member N = 2^(N-1)).
 assert_eq MySQL::set_mask("set('a','b','c','d')", "a")->{mask},   1, "set_mask: first member is the low-order bit"
 assert_eq MySQL::set_mask("set('a','b','c','d')", "d")->{mask},   8, "set_mask: fourth member is bit 3"

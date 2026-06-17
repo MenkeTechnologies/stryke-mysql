@@ -285,6 +285,7 @@ MySQL::parse_in_list($list) → { values, count }  # inverse: ('a','b',NULL) →
 MySQL::parse_enum($type) → { type, kind, values, count }  # enum('a','b')/set(...) COLUMN_TYPE → member list (kind enum|set)
 MySQL::build_enum(%opts) → { type, kind, values, count }  # inverse: {values=>[...], kind=>enum|set} → ENUM('a','b') type decl (round-trips parse_enum)
 MySQL::enum_index($type, $value) → { value, index }       # MySQL's internal 1-based ENUM index (ORDER BY key); '' → 0, non-member → undef; ASCII case-insensitive
+MySQL::enum_value($type, $index) → { index, value }       # inverse of enum_index: 1-based index → member; 0 → '', out-of-range → undef (the stored-int lookup)
 MySQL::set_mask($type, $value)   → { value, mask, members }  # bitmask MySQL stores for a SET value (member N = 2^(N-1)); comma-separated subset, case-insensitive, empty → 0
 MySQL::set_from_mask($type, $mask) → { mask, value, members }  # inverse of set_mask: decode a stored SET bitmask back to its members (definition order); a bit beyond the members errors
 ```

@@ -146,7 +146,7 @@ if ($alive) {
     val $child = "stryke_my_fk_$$"
     eval { MySQL::execute("DROP TABLE IF EXISTS $child", url => $dsn) }
     MySQL::execute(
-        "CREATE TABLE $child (cid INT PRIMARY KEY, parent_id INT, " ~
+        "CREATE TABLE $child (cid INT PRIMARY KEY, parent_id INT, " .
         "CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES $tbl(id)) ENGINE=InnoDB",
         url => $dsn,
     )
@@ -166,8 +166,13 @@ if ($alive) {
     val @ev = MySQL::events(url => $dsn)
     assert_ok ref(\@ev) eq "ARRAY", "events: returns an array"
 
-    # grants: current account always has at least one grant line.
-    val @gr = MySQL::grants("root", host => "%", url => $dsn)
+    # grants: the current account always has at least one grant line. Resolve
+    # the account from CURRENT_USER() rather than hardcoding root@% — the host
+    # half varies by server config (root@localhost on a default install), and
+    # SHOW GRANTS errors (1141) for an account that doesn't exist.
+    val @cu = MySQL::query("SELECT CURRENT_USER() AS cu", url => $dsn)
+    val ($gu, $gh) = split(/@/, $cu[0]->{cu}, 2)
+    val @gr = MySQL::grants($gu, host => $gh, url => $dsn)
     assert_ok ref(\@gr) eq "ARRAY", "grants: returns an array of grant statements"
 
     eval { MySQL::execute("DROP TABLE $tbl", url => $dsn) }

@@ -576,13 +576,15 @@ fn op_explain(opts: Value) -> Result<Value> {
 }
 
 fn op_views(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
     let p = get_pool(&opts)?;
     let mut conn = p.get_conn()?;
-    let (_, rows) = rows_of(
-        &mut conn,
+    // Read the single column positionally: information_schema labels come back
+    // uppercased on many servers (TABLE_NAME vs table_name), so a by-key lookup
+    // of `table_name` would yield undef.
+    let names: Vec<String> = conn.query(
         "SELECT table_name FROM information_schema.views WHERE table_schema = DATABASE() ORDER BY table_name",
     )?;
-    let names: Vec<Value> = rows.into_iter().map(|r| r["table_name"].clone()).collect();
     Ok(json!({"views": names}))
 }
 
@@ -726,12 +728,24 @@ fn op_foreign_keys(opts: Value) -> Result<Value> {
                  AND kcu.table_name = ? \
                  AND kcu.referenced_table_name IS NOT NULL \
                ORDER BY kcu.constraint_name, kcu.ordinal_position";
+    // Key rows by the lowercase SELECT-list names in positional order. Do NOT
+    // use `stmt.columns()` labels: information_schema queries return the column
+    // labels uppercased on many servers (COLUMN_NAME vs column_name), so callers
+    // reading `column_name` would get undef. Row values are positional, so the
+    // fixed name list below is correct as long as it matches the SELECT order.
+    let names: Vec<String> = [
+        "constraint_name",
+        "column_name",
+        "referenced_table_name",
+        "referenced_column_name",
+        "ordinal_position",
+        "update_rule",
+        "delete_rule",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     let stmt = conn.prep(sql)?;
-    let names: Vec<String> = stmt
-        .columns()
-        .iter()
-        .map(|c| c.name_str().to_string())
-        .collect();
     let rows: Vec<Row> = conn.exec(&stmt, (&table,))?;
     let out: Vec<Value> = rows.into_iter().map(|r| row_to_json(r, &names)).collect();
     Ok(json!({"table": table, "foreign_keys": out}))
@@ -784,12 +798,31 @@ fn op_columns(opts: Value) -> Result<Value> {
                FROM information_schema.columns \
                WHERE table_schema = DATABASE() AND table_name = ? \
                ORDER BY ordinal_position";
+    // Key rows by the lowercase SELECT-list names in positional order. Do NOT
+    // use `stmt.columns()` labels: information_schema queries return the column
+    // labels uppercased on many servers (COLUMN_NAME vs column_name), so callers
+    // reading `column_name`/`column_key` would get undef. Row values are
+    // positional, so this fixed list must stay in sync with the SELECT order.
+    let names: Vec<String> = [
+        "ordinal_position",
+        "column_name",
+        "data_type",
+        "column_type",
+        "is_nullable",
+        "column_default",
+        "column_key",
+        "extra",
+        "character_maximum_length",
+        "numeric_precision",
+        "numeric_scale",
+        "character_set_name",
+        "collation_name",
+        "column_comment",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     let stmt = conn.prep(sql)?;
-    let names: Vec<String> = stmt
-        .columns()
-        .iter()
-        .map(|c| c.name_str().to_string())
-        .collect();
     let rows: Vec<Row> = conn.exec(&stmt, (&table,))?;
     let out: Vec<Value> = rows.into_iter().map(|r| row_to_json(r, &names)).collect();
     Ok(json!({"table": table, "columns": out}))

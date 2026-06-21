@@ -88,16 +88,16 @@ $ENV{MYSQL_URL} = "mysql://root:secret@127.0.0.1:3306/test"
 p MySQL::query_scalar "SELECT COUNT(*) FROM users"
 
 # Rows with parameter binding (positional `?`).
-my @rows = MySQL::query "SELECT id, name FROM users WHERE created_at > ?",
+val @rows = MySQL::query "SELECT id, name FROM users WHERE created_at > ?",
                         bind => ["2025-01-01"]
 @rows |> ep
 
 # Callback-per-row variant (cdylib returns all rows in one call).
 MySQL::query_stream "SELECT * FROM big_table",
-    callback => sub ($row) { process $row }
+    callback => fn ($row) { process $row }
 
 # Write paths return { affected, last_insert_id }.
-my $r = MySQL::execute "UPDATE users SET name = ? WHERE id = ?",
+val $r = MySQL::execute "UPDATE users SET name = ? WHERE id = ?",
                        bind => ["alice", 42]
 p "updated $r->{affected}"
 

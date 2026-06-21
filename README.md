@@ -252,6 +252,10 @@ MySQL::status       %opts → @{ {Variable_name, Value} }  # SHOW GLOBAL STATUS;
 MySQL::variables    %opts → @{ {Variable_name, Value} }  # SHOW GLOBAL VARIABLES; opt global => 0
 MySQL::engines      %opts → @rows                         # SHOW ENGINES
 MySQL::kill         $id, %opts → { id, killed }           # KILL a thread
+MySQL::current_database %opts → $database                 # current db name (SELECT DATABASE())
+MySQL::column_names  $table, %opts → @names               # ordinal column names of $table
+MySQL::create_database $name, %opts → { database, created }  # CREATE DATABASE [IF NOT EXISTS]; opt if_not_exists (default true)
+MySQL::drop_database $name, %opts → { database, dropped }    # DROP DATABASE [IF EXISTS]; opt if_exists (default true)
 ```
 
 `exists` uses SQL `EXISTS`, which stops at the first matching row — prefer
@@ -288,6 +292,14 @@ MySQL::enum_index($type, $value) → { value, index }       # MySQL's internal 1
 MySQL::enum_value($type, $index) → { index, value }       # inverse of enum_index: 1-based index → member; 0 → '', out-of-range → undef (the stored-int lookup)
 MySQL::set_mask($type, $value)   → { value, mask, members }  # bitmask MySQL stores for a SET value (member N = 2^(N-1)); comma-separated subset, case-insensitive, empty → 0
 MySQL::set_from_mask($type, $mask) → { mask, value, members }  # inverse of set_mask: decode a stored SET bitmask back to its members (definition order); a bit beyond the members errors
+MySQL::parse_column_type($type) → { type, base, args, attributes, unsigned, zerofill }  # parse a COLUMN_TYPE decl (varchar(64)/decimal(10,2)/int unsigned); enum/set bodies kept whole
+MySQL::normalize_type($type) → $normalized  # canonicalize type for comparison: drops integer display width (INT(11)→int), keeps decimal/char length + unsigned/zerofill
+MySQL::format_assignments(\@cols) → { clause, columns, count }  # comma-joined "col = ?" SET-clause (each ident-validated + backtick-quoted)
+MySQL::format_placeholders($cols, $rows?) → { placeholders, cols, rows, count }  # multi-row VALUES grid e.g. cols=3 rows=2 → "(?, ?, ?), (?, ?, ?)"; $rows defaults to 1
+MySQL::escape_string($val) → $escaped  # mysql_real_escape_string: backslash-escapes NUL \n \r \\ ' " Ctrl-Z, no surrounding quotes
+MySQL::redact_dsn($dsn) → $redacted  # mask password in a URI DSN for logging (mysql://u:s3cret@h/db → mysql://u:***@h/db); no-password DSN unchanged
+MySQL::parse_set_value($val) → { members, count }  # split a stored SET value ("a,b,c") into members; empty/undef → empty list
+MySQL::build_where_eq(\%eq) → { clause, params, columns, count }  # "col = ? AND col2 = ?" bound-equality WHERE from hashref keys (sorted, ident-validated); empty → "1=1"
 ```
 
 ## [0x05] FFI layer
@@ -393,6 +405,7 @@ stryke-mysql/
   examples/
     quick_query.stk
     bulk_load.stk
+    crud.stk
     dump_table.stk
     discover.stk
     explain.stk

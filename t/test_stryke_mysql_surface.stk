@@ -81,4 +81,20 @@ assert_ok exists &MySQL::enum_value, "MySQL::enum_value exists"
 assert_ok exists &MySQL::set_mask, "MySQL::set_mask exists"
 assert_ok exists &MySQL::set_from_mask, "MySQL::set_from_mask exists"
 
+# ── database / column admin ──
+assert_ok exists &MySQL::current_database, "MySQL::current_database exists"
+assert_ok exists &MySQL::create_database, "MySQL::create_database exists"
+assert_ok exists &MySQL::drop_database, "MySQL::drop_database exists"
+assert_ok exists &MySQL::column_names, "MySQL::column_names exists"
+
+# ── pure type / SQL builders ──
+assert_ok exists &MySQL::parse_column_type, "MySQL::parse_column_type exists"
+assert_ok exists &MySQL::normalize_type, "MySQL::normalize_type exists"
+assert_ok exists &MySQL::format_assignments, "MySQL::format_assignments exists"
+assert_ok exists &MySQL::format_placeholders, "MySQL::format_placeholders exists"
+assert_ok exists &MySQL::escape_string, "MySQL::escape_string exists"
+assert_ok exists &MySQL::redact_dsn, "MySQL::redact_dsn exists"
+assert_ok exists &MySQL::parse_set_value, "MySQL::parse_set_value exists"
+assert_ok exists &MySQL::build_where_eq, "MySQL::build_where_eq exists"
+
 test_run

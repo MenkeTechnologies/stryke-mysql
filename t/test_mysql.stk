@@ -275,4 +275,49 @@ assert_dies fn { MySQL::set_from_mask("set('a','b')", 16) },  "set_from_mask: re
 assert_dies fn { MySQL::set_from_mask("enum('a','b')", 1) },  "set_from_mask: rejects an ENUM type"
 assert_dies fn { MySQL::parse_dsn("postgres://localhost/x") }, "parse_dsn rejects a non-mysql scheme"
 
+# parse_column_type: split a MySQL COLUMN_TYPE into parts.
+val $ct = MySQL::parse_column_type("decimal(10,2)")
+assert_eq $ct->{base}, "decimal",            "parse_column_type: base lower-cased"
+assert_eq join(",", @{ $ct->{args} }), "10,2", "parse_column_type: precision,scale split"
+assert_ok MySQL::parse_column_type("int(11) unsigned")->{unsigned}, "parse_column_type: unsigned flag"
+assert_dies fn { MySQL::parse_column_type("varchar(64") }, "parse_column_type: rejects an unterminated paren"
+
+# normalize_type: drop integer display width, keep semantic precision.
+assert_eq MySQL::normalize_type("INT(11)"), "int",               "normalize_type: drops int display width"
+assert_eq MySQL::normalize_type("DECIMAL(10,2)"), "decimal(10,2)", "normalize_type: keeps decimal precision"
+assert_eq MySQL::normalize_type("bigint(20) unsigned"), "bigint unsigned", "normalize_type: keeps unsigned"
+
+# format_assignments: build a validated SET clause.
+val $asg = MySQL::format_assignments(["name", "score"])
+assert_eq $asg->{clause}, "`name` = ?, `score` = ?", "format_assignments: backtick-quoted SET clause"
+assert_eq $asg->{count}, 2,                          "format_assignments: placeholder count"
+assert_dies fn { MySQL::format_assignments(["a; DROP TABLE x"]) }, "format_assignments: rejects injection"
+
+# format_placeholders: build a multi-row VALUES grid.
+assert_eq MySQL::format_placeholders(3)->{placeholders}, "(?, ?, ?)",            "format_placeholders: single row default"
+assert_eq MySQL::format_placeholders(3, 2)->{placeholders}, "(?, ?, ?), (?, ?, ?)", "format_placeholders: two-row grid"
+assert_eq MySQL::format_placeholders(3, 2)->{count}, 6,                          "format_placeholders: count = cols * rows"
+assert_dies fn { MySQL::format_placeholders(0) }, "format_placeholders: rejects zero cols"
+
+# escape_string: mysql_real_escape_string set, no surrounding quotes.
+assert_eq MySQL::escape_string("O'Brien"), "O\\'Brien", "escape_string: escapes quote, no wrapping quotes"
+assert_eq MySQL::escape_string("a\\b"),    "a\\\\b",    "escape_string: doubles backslash first"
+assert_eq MySQL::escape_string("50%_off"), "50%_off",   "escape_string: leaves LIKE metachars alone"
+
+# redact_dsn: mask the password only.
+assert_eq MySQL::redact_dsn("mysql://app:s3cret\@db.example.com:3307/shop"), "mysql://app:***\@db.example.com:3307/shop", "redact_dsn: masks the password"
+assert_eq MySQL::redact_dsn("mysql://root\@127.0.0.1/db"), "mysql://root\@127.0.0.1/db", "redact_dsn: no password → unchanged"
+
+# parse_set_value: split a stored SET column string.
+assert_eq join("|", @{ MySQL::parse_set_value("a,b,c")->{members} }), "a|b|c", "parse_set_value: splits stored members"
+assert_eq MySQL::parse_set_value("")->{count}, 0,    "parse_set_value: empty string → empty list"
+assert_eq MySQL::parse_set_value(undef)->{count}, 0, "parse_set_value: undef → empty list"
+
+# build_where_eq: bound-equality WHERE clause from a hashref (keys sorted).
+val $we = MySQL::build_where_eq({ name => "ada", id => 7 })
+assert_eq $we->{clause}, "`id` = ? AND `name` = ?", "build_where_eq: sorted, backtick-quoted clause"
+assert_eq join("|", @{ $we->{params} }), "7|ada",   "build_where_eq: params follow sorted columns"
+assert_eq MySQL::build_where_eq({})->{clause}, "1=1", "build_where_eq: empty hashref → 1=1"
+assert_dies fn { MySQL::build_where_eq({ "a b" => 1 }) }, "build_where_eq: rejects an invalid column"
+
 test_run

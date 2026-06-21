@@ -58,6 +58,18 @@ exports = [
     "mysql__enum_value",
     "mysql__set_mask",
     "mysql__set_from_mask",
+    "mysql__current_database",
+    "mysql__create_database",
+    "mysql__drop_database",
+    "mysql__column_names",
+    "mysql__parse_column_type",
+    "mysql__normalize_type",
+    "mysql__format_assignments",
+    "mysql__format_placeholders",
+    "mysql__escape_string",
+    "mysql__redact_dsn",
+    "mysql__parse_set_value",
+    "mysql__build_where_eq",
 ]
 
 [scripts]

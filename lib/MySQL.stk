@@ -567,3 +567,98 @@ fn MySQL::set_mask ($type, $value) {
 fn MySQL::set_from_mask ($type, $mask) {
     MySQL::_decode("set_from_mask", mysql__set_from_mask(to_json({ type => $type, mask => $mask })))
 }
+
+# ── database / column admin ───────────────────────────────────────────
+
+## SELECT DATABASE() — the connection's currently-selected database, or undef
+## when none is set.
+fn MySQL::current_database (%opts) {
+    MySQL::_decode("current_database",
+        mysql__current_database(to_json(MySQL::_req({}, \%opts))))->{database}
+}
+
+## CREATE DATABASE [IF NOT EXISTS] $name. The name is identifier-validated.
+## %opts: if_not_exists (default true). Returns a hashref { database, created }.
+fn MySQL::create_database ($name, %opts) {
+    val $r = MySQL::_req(
+        { name => $name, if_not_exists => (exists $opts{if_not_exists} ? ($opts{if_not_exists} ? \1 : \0) : \1) },
+        \%opts)
+    MySQL::_decode("create_database", mysql__create_database(to_json($r)))
+}
+
+## DROP DATABASE [IF EXISTS] $name. The name is identifier-validated.
+## %opts: if_exists (default true). Returns a hashref { database, dropped }.
+fn MySQL::drop_database ($name, %opts) {
+    val $r = MySQL::_req(
+        { name => $name, if_exists => (exists $opts{if_exists} ? ($opts{if_exists} ? \1 : \0) : \1) },
+        \%opts)
+    MySQL::_decode("drop_database", mysql__drop_database(to_json($r)))
+}
+
+## The ordinal column names of $table (information_schema.COLUMNS, ordinal
+## order) — the flat-list complement to schema. Returns the names as a list.
+fn MySQL::column_names ($table, %opts) {
+    val $r = MySQL::_req({ table => $table }, \%opts)
+    @{ MySQL::_decode("column_names", mysql__column_names(to_json($r)))->{columns} }
+}
+
+# ── pure helpers: type / SQL builders (no connection) ──────────────────
+
+## Parse a MySQL column-type declaration (information_schema COLUMN_TYPE form,
+## e.g. varchar(64), decimal(10,2), int unsigned) into a hashref
+## { type, base, args, attributes, unsigned, zerofill }. enum/set bodies are
+## kept whole (use parse_enum for those). Pure.
+fn MySQL::parse_column_type ($type) {
+    MySQL::_decode("parse_column_type", mysql__parse_column_type(to_json({ type => $type })))
+}
+
+## Canonicalize a column-type display string for comparison: drops the cosmetic
+## display width from integer types (INT(11) → int), keeps decimal precision and
+## char/varchar length, preserves unsigned/zerofill. Returns the normalized string.
+fn MySQL::normalize_type ($type) {
+    MySQL::_decode("normalize_type", mysql__normalize_type(to_json({ type => $type })))->{normalized}
+}
+
+## Build a comma-joined "col = ?" SET-clause from an arrayref of column names
+## (each identifier-validated and backtick-quoted). Returns a hashref
+## { clause, columns, count } where count is the number of ? to bind in order.
+fn MySQL::format_assignments ($columns) {
+    MySQL::_decode("format_assignments", mysql__format_assignments(to_json({ columns => $columns })))
+}
+
+## Build a multi-row VALUES placeholder grid for a batch INSERT: $rows tuples of
+## $cols "?" each, e.g. cols=3 rows=2 → "(?, ?, ?), (?, ?, ?)". $rows defaults to
+## 1. Returns a hashref { placeholders, cols, rows, count } (count = cols * rows).
+fn MySQL::format_placeholders ($cols, $rows = 1) {
+    MySQL::_decode("format_placeholders", mysql__format_placeholders(to_json({ cols => $cols, rows => $rows })))
+}
+
+## mysql_real_escape_string: backslash-escape exactly the chars MySQL requires
+## in a string (NUL \n \r \\ ' " Ctrl-Z) WITHOUT adding surrounding quotes — the
+## bare-escaping primitive (quote/quote_literal wrap it). Returns the escaped string.
+fn MySQL::escape_string ($value) {
+    MySQL::_decode("escape_string", mysql__escape_string(to_json({ value => $value })))->{escaped}
+}
+
+## Redact the password in a URI DSN for safe logging (mysql://u:s3cret@h/db →
+## mysql://u:***@h/db), leaving every other part intact. A DSN with no password
+## is returned unchanged. Returns the redacted string.
+fn MySQL::redact_dsn ($dsn) {
+    MySQL::_decode("redact_dsn", mysql__redact_dsn(to_json({ dsn => $dsn })))->{redacted}
+}
+
+## Split a stored SET column's string value ("a,b,c") into its members — the
+## value-level complement to parse_enum (column TYPE) and set_mask (needs type).
+## An empty string or undef yields an empty list. Returns a hashref { members, count }.
+fn MySQL::parse_set_value ($value = undef) {
+    MySQL::_decode("parse_set_value", mysql__parse_set_value(to_json({ value => $value })))
+}
+
+## Build a "col = ? AND col2 = ?" bound-equality WHERE clause from the keys of an
+## $eq hashref (keys sorted, each identifier-validated and backtick-quoted, values
+## returned in the same order). An empty hashref yields "1=1". Returns a hashref
+## { clause, params, columns, count }.
+fn MySQL::build_where_eq ($eq) {
+    die "MySQL::build_where_eq: eq must be a hashref" unless ref($eq) eq "HASH"
+    MySQL::_decode("build_where_eq", mysql__build_where_eq(to_json({ eq => $eq })))
+}

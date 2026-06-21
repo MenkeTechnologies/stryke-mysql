@@ -1524,6 +1524,356 @@ fn op_set_from_mask(opts: Value) -> Result<Value> {
     Ok(json!({ "mask": mask, "value": value, "members": selected }))
 }
 
+// ── connection ops (live) ─────────────────────────────────────────────────────
+
+/// `SELECT DATABASE()` — the connection's currently-selected default database,
+/// or JSON null when none is set (no `/db` in the DSN). opts: connection.
+fn op_current_database(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let db: Option<String> = conn.query_first("SELECT DATABASE()")?.flatten();
+    Ok(json!({ "database": db }))
+}
+
+/// `CREATE DATABASE [IF NOT EXISTS] name` — the database name is identifier-
+/// validated before interpolation (CREATE takes no placeholder). opts: `name`
+/// (required), `if_not_exists` (default true). Returns `{database, created}`
+/// where `created` is the affected-row count (1 when newly created, 0 when it
+/// already existed under `IF NOT EXISTS`).
+fn op_create_database(opts: Value) -> Result<Value> {
+    let name = validate_identifier(
+        opts["name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing name"))?,
+        "name",
+    )?;
+    let if_not_exists = opts["if_not_exists"].as_bool().unwrap_or(true);
+    let clause = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    conn.query_drop(format!("CREATE DATABASE {}{}", clause, quote_ident(&name)))?;
+    Ok(json!({ "database": name, "created": conn.affected_rows() as i64 }))
+}
+
+/// `DROP DATABASE [IF EXISTS] name` — the database name is identifier-validated
+/// before interpolation (DROP takes no placeholder). opts: `name` (required),
+/// `if_exists` (default true). Returns `{database, dropped}` where `dropped` is
+/// the affected-row count.
+fn op_drop_database(opts: Value) -> Result<Value> {
+    let name = validate_identifier(
+        opts["name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing name"))?,
+        "name",
+    )?;
+    let if_exists = opts["if_exists"].as_bool().unwrap_or(true);
+    let clause = if if_exists { "IF EXISTS " } else { "" };
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    conn.query_drop(format!("DROP DATABASE {}{}", clause, quote_ident(&name)))?;
+    Ok(json!({ "database": name, "dropped": conn.affected_rows() as i64 }))
+}
+
+/// The ordinal column names of `table` from `information_schema.COLUMNS`, in
+/// ordinal position — the flat-list complement to `schema`'s full DESCRIBE rows.
+/// The table name is bound (not interpolated). opts: `table` (required),
+/// connection. Returns `{table, columns}`.
+fn op_column_names(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let table = opts["table"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing table"))?
+        .to_string();
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let cols: Vec<String> = conn.exec(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ordinal_position",
+        (&table,),
+    )?;
+    Ok(json!({ "table": table, "columns": cols }))
+}
+
+// ── pure helpers: type / SQL builders (no connection) ─────────────────────────
+
+/// Parse a MySQL column-type declaration into its parts — the
+/// `information_schema.COLUMNS.COLUMN_TYPE` form (e.g. `varchar(64)`,
+/// `decimal(10,2)`, `int unsigned`, `int(11) unsigned zerofill`). The base type
+/// name is taken up to the first `(` or space; a parenthesized argument list is
+/// split at commas into `args` (display width / precision,scale / etc.); trailing
+/// space-separated attributes are collected into `attributes`, with `unsigned` and
+/// `zerofill` surfaced as booleans. `enum`/`set` bodies are NOT split here (their
+/// members can contain commas) — use `parse_enum` for those. opts: `type` (or
+/// `value`, required). Returns `{type, base, args, attributes, unsigned, zerofill}`.
+/// Pure.
+fn op_parse_column_type(opts: Value) -> Result<Value> {
+    let raw = opts
+        .get("type")
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing type"))?;
+    let s = raw.trim();
+    if s.is_empty() {
+        bail!("empty column type");
+    }
+    // base = chars up to the first `(` or whitespace.
+    let base_end = s
+        .find(|c: char| c == '(' || c.is_whitespace())
+        .unwrap_or(s.len());
+    let base = s[..base_end].to_ascii_lowercase();
+    let rest = s[base_end..].trim_start();
+    let lower_base = base.as_str();
+    let mut args: Vec<Value> = Vec::new();
+    let after_args;
+    if let Some(stripped) = rest.strip_prefix('(') {
+        let close = stripped
+            .rfind(')')
+            .ok_or_else(|| anyhow!("unterminated `(` in column type: {raw}"))?;
+        let body = &stripped[..close];
+        // enum/set bodies hold quoted members with possible embedded commas —
+        // leave them whole; parse_enum is the right tool for those.
+        if lower_base != "enum" && lower_base != "set" {
+            for part in body.split(',') {
+                let t = part.trim();
+                if !t.is_empty() {
+                    args.push(json!(t));
+                }
+            }
+        } else if !body.trim().is_empty() {
+            args.push(json!(body.trim()));
+        }
+        after_args = stripped[close + 1..].trim_start();
+    } else {
+        after_args = rest;
+    }
+    let mut attributes: Vec<Value> = Vec::new();
+    let mut unsigned = false;
+    let mut zerofill = false;
+    for tok in after_args.split_whitespace() {
+        let lt = tok.to_ascii_lowercase();
+        match lt.as_str() {
+            "unsigned" => unsigned = true,
+            "zerofill" => zerofill = true,
+            _ => {}
+        }
+        attributes.push(json!(lt));
+    }
+    Ok(json!({
+        "type": raw,
+        "base": base,
+        "args": args,
+        "attributes": attributes,
+        "unsigned": unsigned,
+        "zerofill": zerofill,
+    }))
+}
+
+/// Canonicalize a column-type display string for comparison: lower-cased base
+/// type with the display width dropped from the integer types
+/// (`INT(11)` → `int`, `TINYINT(1)` → `tinyint`) while precision/scale on
+/// `decimal`/`numeric`/`float`/`double` and length on `char`/`varchar`/`binary`/
+/// `varbinary` are kept, and the `unsigned`/`zerofill` attributes are preserved
+/// in canonical order. Built on `parse_column_type`. opts: `type` (or `value`,
+/// required). Returns `{type, normalized}`. Pure.
+fn op_normalize_type(opts: Value) -> Result<Value> {
+    let parsed = op_parse_column_type(opts)?;
+    let base = parsed["base"].as_str().unwrap_or("").to_string();
+    let args = parsed["args"].as_array().cloned().unwrap_or_default();
+    // Integer types carry only a cosmetic display width — drop it.
+    let drop_width = matches!(
+        base.as_str(),
+        "int" | "integer" | "tinyint" | "smallint" | "mediumint" | "bigint" | "year"
+    );
+    let mut out = base.clone();
+    if !drop_width && !args.is_empty() {
+        let joined: Vec<String> = args
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        out.push_str(&format!("({})", joined.join(",")));
+    }
+    if parsed["unsigned"].as_bool().unwrap_or(false) {
+        out.push_str(" unsigned");
+    }
+    if parsed["zerofill"].as_bool().unwrap_or(false) {
+        out.push_str(" zerofill");
+    }
+    Ok(json!({ "type": parsed["type"].clone(), "normalized": out }))
+}
+
+/// Build a comma-joined `col = ?` assignment list for a SQL `SET` clause from a
+/// list of column names — the placeholder side of an `UPDATE`/`ON DUPLICATE KEY
+/// UPDATE`. Each column is identifier-validated (rejecting injection) and
+/// backtick-quoted. opts: `columns` (non-empty array of strings, required).
+/// Returns `{clause, columns, count}` where `count` is the number of `?`
+/// placeholders the caller must bind, in `columns` order. Pure.
+fn op_format_assignments(opts: Value) -> Result<Value> {
+    let cols = opts
+        .get("columns")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing columns (array of strings)"))?;
+    if cols.is_empty() {
+        bail!("columns must be a non-empty array");
+    }
+    let mut names: Vec<String> = Vec::with_capacity(cols.len());
+    let mut parts: Vec<String> = Vec::with_capacity(cols.len());
+    for c in cols {
+        let name = c
+            .as_str()
+            .ok_or_else(|| anyhow!("every column must be a string"))?;
+        validate_identifier(name, "column")?;
+        parts.push(format!("{} = ?", quote_ident(name)));
+        names.push(name.to_string());
+    }
+    Ok(json!({ "clause": parts.join(", "), "columns": names, "count": names.len() }))
+}
+
+/// Build a multi-row VALUES placeholder grid for a batch `INSERT`: `rows` tuples
+/// of `cols` `?` placeholders each, e.g. cols=3 rows=2 → `(?, ?, ?), (?, ?, ?)`.
+/// opts: `cols` (required, >= 1), `rows` (default 1, >= 1). Returns
+/// `{placeholders, cols, rows, count}` where `count = cols * rows` is the total
+/// number of binds the caller supplies in row-major order. Pure.
+fn op_format_placeholders(opts: Value) -> Result<Value> {
+    let cols = opts
+        .get("cols")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing cols (a positive integer)"))?;
+    let rows = opts.get("rows").and_then(Value::as_u64).unwrap_or(1);
+    if cols == 0 {
+        bail!("cols must be >= 1");
+    }
+    if rows == 0 {
+        bail!("rows must be >= 1");
+    }
+    let tuple = format!("({})", vec!["?"; cols as usize].join(", "));
+    let grid = vec![tuple; rows as usize].join(", ");
+    Ok(json!({
+        "placeholders": grid,
+        "cols": cols,
+        "rows": rows,
+        "count": cols * rows,
+    }))
+}
+
+/// `mysql_real_escape_string`: backslash-escape exactly the characters MySQL
+/// requires inside a string in its default (`NO_BACKSLASH_ESCAPES` off) mode —
+/// NUL (`\0`), newline (`\n`), carriage return (`\r`), backslash (`\\`), single
+/// quote (`\'`), double quote (`\"`), and Control-Z (`\Z`) — WITHOUT adding the
+/// surrounding quotes. This is the bare-escaping primitive; `quote`/`quote_literal`
+/// wrap the result in quotes. Backslash is escaped first so the escapes added
+/// after aren't re-doubled. opts: `value` (required). Returns `{escaped}`. Pure.
+fn op_escape_string(opts: Value) -> Result<Value> {
+    let value = opts
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing value"))?;
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('\0', "\\0")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\'', "\\'")
+        .replace('"', "\\\"")
+        .replace('\u{1a}', "\\Z");
+    Ok(json!({ "escaped": escaped }))
+}
+
+/// Redact the password in a URI DSN for safe logging — replaces the password in
+/// the userinfo with `***`, leaving scheme/user/host/port/db/params intact, e.g.
+/// `mysql://app:s3cret@db/shop` → `mysql://app:***@db/shop`. A DSN with no
+/// password (no `:` in userinfo, or no userinfo) is returned unchanged. Built on
+/// `parse_dsn` + `build_dsn`-style reassembly; the host/port/path/query tail after
+/// the userinfo is preserved verbatim. opts: `dsn` (required). Returns
+/// `{redacted}`. Pure.
+fn op_redact_dsn(opts: Value) -> Result<Value> {
+    let dsn = opts
+        .get("dsn")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing dsn"))?;
+    let (scheme, rest) = dsn
+        .split_once("://")
+        .ok_or_else(|| anyhow!("not a URI DSN (missing `://`): {dsn}"))?;
+    // Userinfo runs up to the LAST `@` before the path/query; the tail is kept
+    // verbatim so host/port/db/params are untouched.
+    let (authority, tail) = match rest.find(['/', '?']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let redacted = match authority.rsplit_once('@') {
+        Some((userinfo, hostport)) => {
+            let user = match userinfo.split_once(':') {
+                Some((u, _)) => format!("{}:***", u),
+                None => userinfo.to_string(), // no password to redact
+            };
+            format!("{}://{}@{}{}", scheme, user, hostport, tail)
+        }
+        None => dsn.to_string(), // no userinfo at all
+    };
+    Ok(json!({ "redacted": redacted }))
+}
+
+/// Split a stored `SET` column's string value into its members — the plain
+/// comma-separated form MySQL returns when you `SELECT` a SET column (e.g.
+/// `"a,b,c"`). This is the value-level complement to `parse_enum` (which parses
+/// the column-TYPE declaration) and `set_mask` (which needs the type to compute
+/// bit positions): no type is required here, members are taken verbatim in stored
+/// order, an empty string yields an empty list, and a `null`/absent value also
+/// yields an empty list (a NULL SET column). opts: `value` (string or null).
+/// Returns `{members, count}`. Pure.
+fn op_parse_set_value(opts: Value) -> Result<Value> {
+    let members: Vec<Value> = match opts.get("value") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| anyhow!("value must be a string or null"))?;
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                s.split(',').map(|m| json!(m)).collect()
+            }
+        }
+    };
+    let count = members.len();
+    Ok(json!({ "members": members, "count": count }))
+}
+
+/// Build a `col = ? AND col2 = ?` equality `WHERE` clause from the keys of an
+/// `eq` object — the bound-equality complement to the interpolated `$where` the
+/// `.stk` CRUD helpers take. Keys are sorted for deterministic output, each is
+/// identifier-validated and backtick-quoted, and the matching values are returned
+/// in the same order so the caller binds them positionally. An empty object
+/// yields the clause `1=1` (matches every row) with no params. opts: `eq`
+/// (object, required). Returns `{clause, params, columns, count}`. Pure.
+fn op_build_where_eq(opts: Value) -> Result<Value> {
+    let eq = opts
+        .get("eq")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("missing eq (object of column => value)"))?;
+    if eq.is_empty() {
+        return Ok(json!({ "clause": "1=1", "params": [], "columns": [], "count": 0 }));
+    }
+    let mut cols: Vec<&String> = eq.keys().collect();
+    cols.sort();
+    let mut parts: Vec<String> = Vec::with_capacity(cols.len());
+    let mut params: Vec<Value> = Vec::with_capacity(cols.len());
+    let mut names: Vec<Value> = Vec::with_capacity(cols.len());
+    for c in cols {
+        validate_identifier(c, "column")?;
+        parts.push(format!("{} = ?", quote_ident(c)));
+        params.push(eq[c].clone());
+        names.push(json!(c));
+    }
+    let count = params.len();
+    Ok(json!({
+        "clause": parts.join(" AND "),
+        "params": params,
+        "columns": names,
+        "count": count,
+    }))
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -1759,6 +2109,66 @@ pub extern "C" fn mysql__set_mask(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__set_from_mask(args: *const c_char) -> *const c_char {
     ffi_call(args, op_set_from_mask)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__current_database(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_current_database)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__create_database(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_create_database)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__drop_database(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_drop_database)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__column_names(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_column_names)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__parse_column_type(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_column_type)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__normalize_type(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_normalize_type)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__format_assignments(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_format_assignments)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__format_placeholders(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_format_placeholders)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__escape_string(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_escape_string)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__redact_dsn(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_redact_dsn)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__parse_set_value(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_parse_set_value)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__build_where_eq(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_build_where_eq)
 }
 
 #[cfg(test)]
@@ -2914,5 +3324,276 @@ mod tests {
         assert_eq!(percent_decode("a%20b"), "a b");
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    // ── new connection-op validation (rejects before opening a connection) ────
+
+    #[test]
+    fn create_drop_database_validate_identifier_before_connecting() {
+        with_env(|| {
+            // Missing name errors before any connect.
+            assert!(op_create_database(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing name"));
+            assert!(op_drop_database(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing name"));
+            // An injection-shaped name is rejected by validate_identifier — the
+            // DROP/CREATE string is never built, so no connection is attempted.
+            assert!(op_create_database(json!({"name": "db; DROP TABLE x"})).is_err());
+            assert!(op_drop_database(json!({"name": "a`b"})).is_err());
+            assert!(op_create_database(json!({"name": ""})).is_err());
+        });
+    }
+
+    #[test]
+    fn column_names_requires_table() {
+        with_env(|| {
+            assert!(op_column_names(json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("missing table"));
+        });
+    }
+
+    // ── parse_column_type ──
+
+    #[test]
+    fn parse_column_type_splits_base_args_attributes() {
+        let varchar = op_parse_column_type(json!({"type": "varchar(64)"})).unwrap();
+        assert_eq!(varchar["base"], json!("varchar"));
+        assert_eq!(varchar["args"], json!(["64"]));
+        assert_eq!(varchar["unsigned"], json!(false));
+
+        let dec = op_parse_column_type(json!({"type": "DECIMAL(10,2)"})).unwrap();
+        assert_eq!(dec["base"], json!("decimal"), "base is lower-cased");
+        assert_eq!(
+            dec["args"],
+            json!(["10", "2"]),
+            "precision,scale split at comma"
+        );
+
+        let uint = op_parse_column_type(json!({"type": "int(11) unsigned zerofill"})).unwrap();
+        assert_eq!(uint["base"], json!("int"));
+        assert_eq!(uint["args"], json!(["11"]));
+        assert_eq!(uint["unsigned"], json!(true));
+        assert_eq!(uint["zerofill"], json!(true));
+        assert_eq!(uint["attributes"], json!(["unsigned", "zerofill"]));
+
+        // No-arg type with a trailing attribute.
+        let bigint = op_parse_column_type(json!({"type": "bigint unsigned"})).unwrap();
+        assert_eq!(bigint["base"], json!("bigint"));
+        assert_eq!(bigint["args"], json!([]));
+        assert_eq!(bigint["unsigned"], json!(true));
+
+        // enum/set bodies are kept whole (commas inside members must not split).
+        let en = op_parse_column_type(json!({"type": "enum('a','b,c')"})).unwrap();
+        assert_eq!(en["base"], json!("enum"));
+        assert_eq!(
+            en["args"],
+            json!(["'a','b,c'"]),
+            "enum body is not comma-split here — use parse_enum"
+        );
+
+        // `value` alias and errors.
+        assert_eq!(
+            op_parse_column_type(json!({"value": "text"})).unwrap()["base"],
+            json!("text")
+        );
+        assert!(op_parse_column_type(json!({"type": "varchar(64"})).is_err());
+        assert!(op_parse_column_type(json!({"type": "  "})).is_err());
+        assert!(op_parse_column_type(json!({})).is_err());
+    }
+
+    // ── normalize_type ──
+
+    #[test]
+    fn normalize_type_drops_int_display_width_keeps_decimal_precision() {
+        let n = |t: &str| {
+            op_normalize_type(json!({ "type": t })).unwrap()["normalized"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Integer display width is cosmetic — dropped.
+        assert_eq!(n("INT(11)"), "int");
+        assert_eq!(n("TINYINT(1)"), "tinyint");
+        assert_eq!(n("bigint(20) unsigned"), "bigint unsigned");
+        // Precision/scale and length are semantic — kept.
+        assert_eq!(n("DECIMAL(10,2)"), "decimal(10,2)");
+        assert_eq!(n("VARCHAR(255)"), "varchar(255)");
+        // No-arg types pass through lower-cased.
+        assert_eq!(n("TEXT"), "text");
+        // unsigned + zerofill canonical order.
+        assert_eq!(n("int(10) unsigned zerofill"), "int unsigned zerofill");
+        assert!(op_normalize_type(json!({})).is_err());
+    }
+
+    // ── format_assignments ──
+
+    #[test]
+    fn format_assignments_builds_validated_set_clause() {
+        let v = op_format_assignments(json!({"columns": ["name", "score"]})).unwrap();
+        assert_eq!(v["clause"], json!("`name` = ?, `score` = ?"));
+        assert_eq!(v["count"], json!(2));
+        assert_eq!(v["columns"], json!(["name", "score"]));
+        // A single column.
+        assert_eq!(
+            op_format_assignments(json!({"columns": ["x"]})).unwrap()["clause"],
+            json!("`x` = ?")
+        );
+        // Injection-shaped column is rejected.
+        assert!(op_format_assignments(json!({"columns": ["a; DROP TABLE x"]})).is_err());
+        assert!(op_format_assignments(json!({"columns": ["a b"]})).is_err());
+        // Empty / missing / non-string element.
+        assert!(op_format_assignments(json!({"columns": []})).is_err());
+        assert!(op_format_assignments(json!({"columns": [1]})).is_err());
+        assert!(op_format_assignments(json!({})).is_err());
+    }
+
+    // ── format_placeholders ──
+
+    #[test]
+    fn format_placeholders_builds_values_grid() {
+        let one = op_format_placeholders(json!({"cols": 3})).unwrap();
+        assert_eq!(
+            one["placeholders"],
+            json!("(?, ?, ?)"),
+            "rows defaults to 1"
+        );
+        assert_eq!(one["count"], json!(3));
+
+        let grid = op_format_placeholders(json!({"cols": 3, "rows": 2})).unwrap();
+        assert_eq!(grid["placeholders"], json!("(?, ?, ?), (?, ?, ?)"));
+        assert_eq!(grid["count"], json!(6), "count = cols * rows");
+
+        let single = op_format_placeholders(json!({"cols": 1, "rows": 1})).unwrap();
+        assert_eq!(single["placeholders"], json!("(?)"));
+
+        // Zero cols/rows and missing cols error.
+        assert!(op_format_placeholders(json!({"cols": 0})).is_err());
+        assert!(op_format_placeholders(json!({"cols": 2, "rows": 0})).is_err());
+        assert!(op_format_placeholders(json!({})).is_err());
+    }
+
+    // ── escape_string ──
+
+    #[test]
+    fn escape_string_escapes_mysql_real_escape_set_without_quotes() {
+        let esc = |s: &str| {
+            op_escape_string(json!({ "value": s })).unwrap()["escaped"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // No surrounding quotes are added (unlike quote/quote_literal).
+        assert_eq!(esc("O'Brien"), "O\\'Brien");
+        // Backslash is doubled first so later escapes aren't re-doubled.
+        assert_eq!(esc("a\\b"), "a\\\\b");
+        // The full required set: NUL, newline, CR, double-quote, Ctrl-Z.
+        assert_eq!(esc("a\0b"), "a\\0b");
+        assert_eq!(esc("a\nb"), "a\\nb");
+        assert_eq!(esc("a\rb"), "a\\rb");
+        assert_eq!(esc("a\"b"), "a\\\"b");
+        assert_eq!(esc("a\u{1a}b"), "a\\Zb");
+        // A string with none of the special chars is unchanged.
+        assert_eq!(esc("plain text 123"), "plain text 123");
+        // `%` and `_` are NOT escaped here (those are LIKE-level, see escape_like).
+        assert_eq!(esc("50%_off"), "50%_off");
+        assert!(op_escape_string(json!({})).is_err());
+    }
+
+    // ── redact_dsn ──
+
+    #[test]
+    fn redact_dsn_masks_password_only() {
+        let red = |d: &str| {
+            op_redact_dsn(json!({ "dsn": d })).unwrap()["redacted"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            red("mysql://app:s3cret@db.example.com:3307/shop"),
+            "mysql://app:***@db.example.com:3307/shop"
+        );
+        // Query string and mariadb scheme survive; only the password is masked.
+        assert_eq!(
+            red("mariadb://u:p@h/db?charset=utf8mb4"),
+            "mariadb://u:***@h/db?charset=utf8mb4"
+        );
+        // No password (user only) → unchanged.
+        assert_eq!(
+            red("mysql://root@127.0.0.1/db"),
+            "mysql://root@127.0.0.1/db"
+        );
+        // No userinfo at all → unchanged.
+        assert_eq!(red("mysql://localhost/db"), "mysql://localhost/db");
+        // A `@` inside the password (before the real `@`) is handled by rsplit:
+        // the LAST `@` separates userinfo from host.
+        assert_eq!(
+            red("mysql://u:p@ss@host/db"),
+            "mysql://u:***@host/db",
+            "password is masked regardless of its content"
+        );
+        assert!(op_redact_dsn(json!({"dsn": "not a dsn"})).is_err());
+        assert!(op_redact_dsn(json!({})).is_err());
+    }
+
+    // ── parse_set_value ──
+
+    #[test]
+    fn parse_set_value_splits_stored_set_string() {
+        let v = op_parse_set_value(json!({"value": "a,b,c"})).unwrap();
+        assert_eq!(v["members"], json!(["a", "b", "c"]));
+        assert_eq!(v["count"], json!(3));
+        // Single member.
+        assert_eq!(
+            op_parse_set_value(json!({"value": "only"})).unwrap()["members"],
+            json!(["only"])
+        );
+        // Empty string → empty list (an empty SET value).
+        let empty = op_parse_set_value(json!({"value": ""})).unwrap();
+        assert_eq!(empty["members"], json!([]));
+        assert_eq!(empty["count"], json!(0));
+        // null / absent → empty list (a NULL SET column).
+        assert_eq!(
+            op_parse_set_value(json!({ "value": Value::Null })).unwrap()["members"],
+            json!([])
+        );
+        assert_eq!(op_parse_set_value(json!({})).unwrap()["members"], json!([]));
+        // A non-string, non-null value is rejected.
+        assert!(op_parse_set_value(json!({"value": 7})).is_err());
+    }
+
+    // ── build_where_eq ──
+
+    #[test]
+    fn build_where_eq_builds_sorted_bound_equality_clause() {
+        let v = op_build_where_eq(json!({"eq": {"name": "ada", "id": 7}})).unwrap();
+        // Keys sorted for determinism: id before name.
+        assert_eq!(v["clause"], json!("`id` = ? AND `name` = ?"));
+        assert_eq!(
+            v["params"],
+            json!([7, "ada"]),
+            "params follow the sorted columns"
+        );
+        assert_eq!(v["columns"], json!(["id", "name"]));
+        assert_eq!(v["count"], json!(2));
+        // A single condition.
+        let one = op_build_where_eq(json!({"eq": {"active": true}})).unwrap();
+        assert_eq!(one["clause"], json!("`active` = ?"));
+        assert_eq!(one["params"], json!([true]));
+        // Empty object → `1=1`, no params.
+        let none = op_build_where_eq(json!({"eq": {}})).unwrap();
+        assert_eq!(none["clause"], json!("1=1"));
+        assert_eq!(none["count"], json!(0));
+        // Injection-shaped column key is rejected.
+        assert!(op_build_where_eq(json!({"eq": {"a; DROP TABLE x": 1}})).is_err());
+        assert!(op_build_where_eq(json!({"eq": {"a b": 1}})).is_err());
+        // Missing eq object.
+        assert!(op_build_where_eq(json!({})).is_err());
     }
 }

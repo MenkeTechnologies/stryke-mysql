@@ -14,6 +14,6 @@ die "set \$MYSQL_DSN\n" unless defined $dsn
 val $n = MySQL::query_stream(
     "SELECT * FROM $tbl",
     dsn      => $dsn,
-    callback => sub ($row) { p to_json $row },
+    callback => fn { p to_json _ },
 )
 warn "dumped $n rows\n"

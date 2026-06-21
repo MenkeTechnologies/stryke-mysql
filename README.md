@@ -94,7 +94,7 @@ val @rows = MySQL::query "SELECT id, name FROM users WHERE created_at > ?",
 
 # Callback-per-row variant (cdylib returns all rows in one call).
 MySQL::query_stream "SELECT * FROM big_table",
-    callback => fn ($row) { process $row }
+    callback => fn { process _ }
 
 # Write paths return { affected, last_insert_id }.
 val $r = MySQL::execute "UPDATE users SET name = ? WHERE id = ?",

@@ -101,6 +101,10 @@
         <div class="stat-card"><div class="stat-val cyan">opt-in</div><div class="stat-label">Tier</div></div>
         <div class="stat-card"><div class="stat-val cyan">dlopen</div><div class="stat-label">Load model</div></div>
         <div class="stat-card"><div class="stat-val">JSON-over-FFI</div><div class="stat-label">Envelope</div></div>
+        <div class="stat-card"><div class="stat-val green">77</div><div class="stat-label"><code>MySQL::*</code> functions</div></div>
+        <div class="stat-card"><div class="stat-val green">66</div><div class="stat-label"><code>mysql__*</code> FFI exports</div></div>
+        <div class="stat-card"><div class="stat-val">v0.21.0</div><div class="stat-label">Package version</div></div>
+        <div class="stat-card"><div class="stat-val cyan">Pool/URL</div><div class="stat-label">Connection cache</div></div>
       </div>
 
       <hr class="section-rule">
@@ -115,7 +119,7 @@
           <tr><td>Build</td><td>Cargo with <code>[lib] crate-type = ["cdylib"]</code>; <code>publish = false</code>; the package itself ships via <code>s pkg install -g .</code></td></tr>
           <tr><td>Install path</td><td><code>~/.stryke/store/mysql@&lt;version&gt;/</code> after <code>make install</code>; <code>use MySQL</code> from any stryke script resolves it</td></tr>
           <tr><td>Tests</td><td>zunit-style under <code>t/</code> with live-service variants when applicable</td></tr>
-          <tr><td>CI</td><td>GitHub Actions <code>.github/workflows/ci.yml</code> &mdash; cargo fmt + clippy + test, plus stryke pkg install verification</td></tr>
+          <tr><td>CI</td><td>GitHub Actions <code>.github/workflows/ci.yml</code> &mdash; <code>cargo check</code> + <code>fmt --check</code> + <code>clippy -D warnings</code> + <code>test</code>, plus a Stryke <code>.stk</code> suite job that builds the cdylib, installs the package, and runs <code>t/</code> against a live MySQL service</td></tr>
         </tbody>
       </table>
 
@@ -135,8 +139,43 @@
 {"error": "&lt;msg&gt;"}        # failure — wrapper die()s with the message</pre>
 
       <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">@</span>FUNCTION SURFACE</h2>
+      <p>The stryke side (<code>lib/MySQL.stk</code>) exposes 77 public <code>MySQL::*</code> functions. Most connection-aware verbs map 1:1 to a <code>mysql__*</code> FFI export; the higher-level CRUD helpers and several read shapes are composed on the stryke side, which is why there are more functions (77) than exports (66).</p>
+      <table class="arch-table">
+        <thead><tr><th>Group</th><th>Functions</th></tr></thead>
+        <tbody>
+          <tr><td>Read</td><td><code>query</code>, <code>query_one</code>, <code>query_col</code>, <code>query_scalar</code>, <code>query_stream</code>, <code>query_multi</code>, <code>call</code>, <code>dump</code></td></tr>
+          <tr><td>Write / CRUD</td><td><code>execute</code>, <code>exec_file</code>, <code>insert_many</code>, <code>upsert</code>, <code>update</code>, <code>delete</code>, <code>truncate</code>, <code>count</code>, <code>exists</code>, <code>table_exists</code></td></tr>
+          <tr><td>Transactions</td><td><code>transaction</code> (one connection, real <code>START TRANSACTION</code>, all-or-nothing)</td></tr>
+          <tr><td>Introspection</td><td><code>databases</code>, <code>tables</code>, <code>views</code>, <code>schema</code>, <code>columns</code>, <code>column_names</code>, <code>indexes</code>, <code>foreign_keys</code>, <code>create_table</code>, <code>procedures</code>, <code>triggers</code>, <code>events</code>, <code>charsets</code>, <code>collations</code>, <code>engines</code></td></tr>
+          <tr><td>Admin / observability</td><td><code>ping</code>, <code>users</code>, <code>grants</code>, <code>status</code>, <code>variables</code>, <code>processlist</code>, <code>kill</code>, <code>db_size</code>, <code>table_size</code>, <code>explain</code>, <code>current_database</code>, <code>create_database</code>, <code>drop_database</code></td></tr>
+          <tr><td>Version</td><td><code>version</code> (cdylib build), <code>server_version</code> (live <code>SELECT VERSION()</code>)</td></tr>
+          <tr><td>Pure helpers (no connection)</td><td>DSN (<code>parse_dsn</code>/<code>build_dsn</code>/<code>redact_dsn</code>), identifiers (<code>quote_ident</code>/<code>unquote_ident</code>/<code>quote_qualified_ident</code>/<code>parse_qualified_ident</code>), literals (<code>quote_literal</code>/<code>unquote_literal</code>/<code>quote</code>/<code>escape_string</code>), LIKE (<code>escape_like</code>/<code>unescape_like</code>/<code>like_pattern</code>), IN lists (<code>format_in_list</code>/<code>parse_in_list</code>), ENUM/SET (<code>parse_enum</code>/<code>build_enum</code>/<code>enum_index</code>/<code>enum_value</code>/<code>set_mask</code>/<code>set_from_mask</code>/<code>parse_set_value</code>), types (<code>parse_column_type</code>/<code>normalize_type</code>), builders (<code>format_assignments</code>/<code>format_placeholders</code>/<code>build_where_eq</code>)</td></tr>
+        </tbody>
+      </table>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">+</span>DEPENDENCIES</h2>
+      <p>The cdylib keeps a deliberately small, foundational dependency set. The release profile is tuned for a compact shippable artifact (<code>opt-level = 3</code>, <code>lto = "thin"</code>, <code>codegen-units = 1</code>, <code>strip = true</code>, <code>panic = "abort"</code>).</p>
+      <table class="arch-table">
+        <thead><tr><th>Crate</th><th>Version</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>mysql</code></td><td>28 (<code>minimal-rust</code>, <code>buffer-pool</code>, <code>client_ed25519</code>)</td><td>MySQL / MariaDB protocol driver + connection pool</td></tr>
+          <tr><td><code>serde</code> / <code>serde_json</code></td><td>1 (<code>preserve_order</code>)</td><td>JSON-over-FFI envelope encode/decode</td></tr>
+          <tr><td><code>chrono</code></td><td>0.4 (<code>clock</code>, <code>std</code>)</td><td>DATE / DATETIME / TIME formatting</td></tr>
+          <tr><td><code>once_cell</code></td><td>1</td><td>process-lifetime <code>mysql::Pool</code> cache</td></tr>
+          <tr><td><code>parking_lot</code></td><td>0.12</td><td>locking for the pool cache</td></tr>
+          <tr><td><code>anyhow</code></td><td>1</td><td>error propagation inside the cdylib</td></tr>
+        </tbody>
+      </table>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">^</span>TYPE ENCODING</h2>
+      <p>Result rows cross the FFI boundary as JSON. Integer/float types become JSON numbers; <code>DECIMAL</code> is a string (the protocol sends it as bytes); <code>DATE</code>/<code>DATETIME</code>/<code>TIMESTAMP</code>/<code>TIME</code> become formatted strings; <code>JSON</code> columns are returned as raw JSON text; <code>NULL</code> becomes null. A <code>BLOB</code>/<code>VARBINARY</code> value is a string when it is valid UTF-8, otherwise it is prefixed <code>"base64:"</code> so consumers can detect and decode it. The full table is in the <a href="https://github.com/MenkeTechnologies/stryke-mysql#0x06-type-encoding">README "Type encoding" section</a>.</p>
+
+      <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">/</span>SCOPE</h2>
-      <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-mysql#readme">"Why this is a package"</a> + "API reference" sections for the authoritative scope. The package is intentionally narrower than its underlying SDK / driver &mdash; the goal is "useful from a shell pipeline", not "complete API coverage".</p>
+      <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-mysql#readme">"Why this is a package"</a> + "API reference" sections for the authoritative scope. The package is intentionally narrower than its underlying SDK / driver &mdash; the goal is "useful from a shell pipeline", not "complete API coverage". The connector currently exposes 77 stryke functions over 66 FFI exports, covering query, CRUD, transactions, introspection, admin, and connection-free SQL helpers. There is no separate CLI binary &mdash; the surface is the <code>use MySQL</code> package; the historical <code>stryke-mysql-helper</code> fork-per-call binary and its JSON-RPC daemon mode were replaced by the in-process cdylib + pool cache.</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">#</span>PROJECT METADATA</h2>

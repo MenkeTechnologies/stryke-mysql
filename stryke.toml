@@ -70,6 +70,13 @@ exports = [
     "mysql__redact_dsn",
     "mysql__parse_set_value",
     "mysql__build_where_eq",
+    "mysql__charsets",
+    "mysql__collations",
+    "mysql__columns",
+    "mysql__create_table",
+    "mysql__events",
+    "mysql__foreign_keys",
+    "mysql__grants",
 ]
 
 [scripts]

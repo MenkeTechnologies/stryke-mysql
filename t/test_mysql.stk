@@ -130,6 +130,46 @@ if ($alive) {
 
     eval { MySQL::execute("DROP TABLE $kv", url => $dsn) }
 
+    # ── introspection extras on the still-live $tbl ───────────────────
+    # create_table: DDL string mentions the table name.
+    val $ddl = MySQL::create_table($tbl, url => $dsn)
+    assert_ok index($ddl, $tbl) >= 0, "create_table: DDL contains the table name"
+
+    # columns: full information_schema metadata for the 3 declared columns.
+    val @cols = MySQL::columns($tbl, url => $dsn)
+    assert_eq scalar(@cols), 3, "columns: 3 columns"
+    assert_eq $cols[0]->{column_name}, "id", "columns: first column is id (ordinal 1)"
+    val $idkey = grep { $_->{column_name} eq "id" && $_->{column_key} eq "PRI" } @cols
+    assert_ok $idkey, "columns: id reported as PRIMARY key"
+
+    # foreign_keys: create a child table that references $tbl(id).
+    val $child = "stryke_my_fk_$$"
+    eval { MySQL::execute("DROP TABLE IF EXISTS $child", url => $dsn) }
+    MySQL::execute(
+        "CREATE TABLE $child (cid INT PRIMARY KEY, parent_id INT, " ~
+        "CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES $tbl(id)) ENGINE=InnoDB",
+        url => $dsn,
+    )
+    val @fks = MySQL::foreign_keys($child, url => $dsn)
+    assert_eq scalar(@fks), 1, "foreign_keys: one FK on child table"
+    assert_eq $fks[0]->{referenced_table_name}, $tbl, "foreign_keys: references parent table"
+    assert_eq $fks[0]->{column_name}, "parent_id", "foreign_keys: local column is parent_id"
+    eval { MySQL::execute("DROP TABLE $child", url => $dsn) }
+
+    # charsets / collations: server-wide catalogs, always non-empty.
+    val @cs = MySQL::charsets(url => $dsn)
+    assert_ok scalar(@cs) > 0, "charsets: server lists at least one character set"
+    val @col = MySQL::collations(url => $dsn)
+    assert_ok scalar(@col) > 0, "collations: server lists at least one collation"
+
+    # events: SHOW EVENTS returns an array (empty when none scheduled).
+    val @ev = MySQL::events(url => $dsn)
+    assert_ok ref(\@ev) eq "ARRAY", "events: returns an array"
+
+    # grants: current account always has at least one grant line.
+    val @gr = MySQL::grants("root", host => "%", url => $dsn)
+    assert_ok ref(\@gr) eq "ARRAY", "grants: returns an array of grant statements"
+
     eval { MySQL::execute("DROP TABLE $tbl", url => $dsn) }
 }
 

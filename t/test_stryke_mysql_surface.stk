@@ -58,6 +58,13 @@ assert_ok exists &MySQL::variables, "MySQL::variables exists"
 assert_ok exists &MySQL::engines, "MySQL::engines exists"
 assert_ok exists &MySQL::table_size, "MySQL::table_size exists"
 assert_ok exists &MySQL::kill, "MySQL::kill exists"
+assert_ok exists &MySQL::foreign_keys, "MySQL::foreign_keys exists"
+assert_ok exists &MySQL::create_table, "MySQL::create_table exists"
+assert_ok exists &MySQL::columns, "MySQL::columns exists"
+assert_ok exists &MySQL::events, "MySQL::events exists"
+assert_ok exists &MySQL::grants, "MySQL::grants exists"
+assert_ok exists &MySQL::charsets, "MySQL::charsets exists"
+assert_ok exists &MySQL::collations, "MySQL::collations exists"
 
 # ── pure DSN/quoting helpers ──
 assert_ok exists &MySQL::parse_dsn, "MySQL::parse_dsn exists"

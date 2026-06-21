@@ -404,6 +404,55 @@ fn MySQL::kill ($id, %opts) {
     MySQL::_decode("kill", mysql__kill(to_json($r)))
 }
 
+## Foreign-key constraints on $table — rows joining key_column_usage with
+## referential_constraints ({ constraint_name, column_name,
+## referenced_table_name, referenced_column_name, ordinal_position,
+## update_rule, delete_rule }). Required: table.
+fn MySQL::foreign_keys ($table, %opts) {
+    val $r = MySQL::_req({ table => $table }, \%opts)
+    @{ MySQL::_decode("foreign_keys", mysql__foreign_keys(to_json($r)))->{foreign_keys} }
+}
+
+## SHOW CREATE TABLE $table — the full CREATE TABLE DDL string. Required: table.
+fn MySQL::create_table ($table, %opts) {
+    val $r = MySQL::_req({ table => $table }, \%opts)
+    MySQL::_decode("create_table", mysql__create_table(to_json($r)))->{create_table}
+}
+
+## Full information_schema.COLUMNS metadata for $table (richer than schema):
+## rows of { ordinal_position, column_name, data_type, column_type,
+## is_nullable, column_default, column_key, extra, character_maximum_length,
+## numeric_precision, numeric_scale, character_set_name, collation_name,
+## column_comment }. Required: table.
+fn MySQL::columns ($table, %opts) {
+    val $r = MySQL::_req({ table => $table }, \%opts)
+    @{ MySQL::_decode("columns", mysql__columns(to_json($r)))->{columns} }
+}
+
+## SHOW EVENTS — scheduled events in the current database.
+fn MySQL::events (%opts) {
+    @{ MySQL::_decode("events", mysql__events(to_json(MySQL::_req({}, \%opts))))->{events} }
+}
+
+## SHOW GRANTS FOR user@host — the privilege grant statements for an account.
+## Required: user. Optional: host (defaults to "%").
+fn MySQL::grants ($user, %opts) {
+    var %extra = (user => $user)
+    $extra{host} = $opts{host} if exists $opts{host} && defined $opts{host}
+    val $r = MySQL::_req(\%extra, \%opts)
+    @{ MySQL::_decode("grants", mysql__grants(to_json($r)))->{grants} }
+}
+
+## SHOW CHARACTER SET — available character sets and their default collations.
+fn MySQL::charsets (%opts) {
+    @{ MySQL::_decode("charsets", mysql__charsets(to_json(MySQL::_req({}, \%opts))))->{charsets} }
+}
+
+## SHOW COLLATION — available collations and the charset each belongs to.
+fn MySQL::collations (%opts) {
+    @{ MySQL::_decode("collations", mysql__collations(to_json(MySQL::_req({}, \%opts))))->{collations} }
+}
+
 # ── pure helpers (no connection) ──────────────────────────────────────
 
 ## Parse a URI DSN "mysql|mariadb://[user[:pass]@]host[:port][/db][?k=v]" into

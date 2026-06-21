@@ -701,6 +701,147 @@ fn op_table_size(opts: Value) -> Result<Value> {
     Ok(json!({"table": table, "data_bytes": data, "index_bytes": index, "bytes": data + index}))
 }
 
+/// Foreign-key constraints for `$table` in the current database. Joins
+/// `information_schema.key_column_usage` (which column references which) with
+/// `referential_constraints` (the ON UPDATE / ON DELETE rules), ordered by
+/// constraint then column position.
+fn op_foreign_keys(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
+    let sql = "SELECT kcu.constraint_name, kcu.column_name, \
+               kcu.referenced_table_name, kcu.referenced_column_name, \
+               kcu.ordinal_position, rc.update_rule, rc.delete_rule \
+               FROM information_schema.key_column_usage kcu \
+               JOIN information_schema.referential_constraints rc \
+                 ON rc.constraint_schema = kcu.table_schema \
+                AND rc.constraint_name = kcu.constraint_name \
+               WHERE kcu.table_schema = DATABASE() \
+                 AND kcu.table_name = ? \
+                 AND kcu.referenced_table_name IS NOT NULL \
+               ORDER BY kcu.constraint_name, kcu.ordinal_position";
+    let stmt = conn.prep(sql)?;
+    let names: Vec<String> = stmt
+        .columns()
+        .iter()
+        .map(|c| c.name_str().to_string())
+        .collect();
+    let rows: Vec<Row> = conn.exec(&stmt, (&table,))?;
+    let out: Vec<Value> = rows.into_iter().map(|r| row_to_json(r, &names)).collect();
+    Ok(json!({"table": table, "foreign_keys": out}))
+}
+
+/// The `SHOW CREATE TABLE $table` DDL. Returns the full `CREATE TABLE …`
+/// statement MySQL would emit to recreate the table — companion to `schema`
+/// (which only lists columns). Required: table.
+fn op_create_table(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
+    // SHOW CREATE TABLE returns one row: (Table, Create Table). The DDL is the
+    // second column; index by position since the header label varies.
+    let row: Option<Row> = conn.query_first(format!("SHOW CREATE TABLE {}", table))?;
+    let ddl = match row {
+        Some(r) => match r.as_ref(1).cloned() {
+            Some(v) => my_value_to_json(&v),
+            None => Value::Null,
+        },
+        None => bail!("table `{table}` not found"),
+    };
+    Ok(json!({"table": table, "create_table": ddl}))
+}
+
+/// Full column metadata for `$table` from `information_schema.columns` — richer
+/// than `schema`/DESCRIBE (includes character_maximum_length, numeric_precision,
+/// numeric_scale, column_default, is_nullable, column_key, extra, column_comment).
+/// Ordered by ordinal position. Required: table.
+fn op_columns(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let table = validate_identifier(
+        opts["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing table"))?,
+        "table",
+    )?;
+    let sql = "SELECT ordinal_position, column_name, data_type, column_type, \
+               is_nullable, column_default, column_key, extra, \
+               character_maximum_length, numeric_precision, numeric_scale, \
+               character_set_name, collation_name, column_comment \
+               FROM information_schema.columns \
+               WHERE table_schema = DATABASE() AND table_name = ? \
+               ORDER BY ordinal_position";
+    let stmt = conn.prep(sql)?;
+    let names: Vec<String> = stmt
+        .columns()
+        .iter()
+        .map(|c| c.name_str().to_string())
+        .collect();
+    let rows: Vec<Row> = conn.exec(&stmt, (&table,))?;
+    let out: Vec<Value> = rows.into_iter().map(|r| row_to_json(r, &names)).collect();
+    Ok(json!({"table": table, "columns": out}))
+}
+
+/// `SHOW EVENTS` — scheduled events in the current database. Parallel to
+/// `triggers` and `procedures`; rows expose Name, Definer, Type, Status,
+/// Interval, etc.
+fn op_events(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(&mut conn, "SHOW EVENTS")?;
+    Ok(json!({"events": rows}))
+}
+
+/// `SHOW GRANTS FOR user@host` — the privilege grants for one account.
+/// Companion to `users`. Required: user. Optional: host (defaults to `%`).
+fn op_grants(opts: Value) -> Result<Value> {
+    use mysql::prelude::Queryable;
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let user = opts["user"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing user"))?;
+    let host = opts["host"].as_str().unwrap_or("%");
+    // SHOW GRANTS FOR takes a quoted account, not an identifier; the user/host
+    // are bound as literals via the QUOTE-style single-quote escaper so a name
+    // with a quote can't break out.
+    let q = |s: &str| format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"));
+    let sql = format!("SHOW GRANTS FOR {}@{}", q(user), q(host));
+    let grants: Vec<String> = conn.query(sql)?;
+    Ok(json!({"user": user, "host": host, "grants": grants}))
+}
+
+/// `SHOW CHARACTER SET` — available character sets and their default collation /
+/// max byte length per character.
+fn op_charsets(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(&mut conn, "SHOW CHARACTER SET")?;
+    Ok(json!({"charsets": rows}))
+}
+
+/// `SHOW COLLATION` — available collations, the charset each belongs to, and
+/// whether it is the charset default / compiled-in.
+fn op_collations(opts: Value) -> Result<Value> {
+    let p = get_pool(&opts)?;
+    let mut conn = p.get_conn()?;
+    let (_, rows) = rows_of(&mut conn, "SHOW COLLATION")?;
+    Ok(json!({"collations": rows}))
+}
+
 fn op_kill(opts: Value) -> Result<Value> {
     use mysql::prelude::Queryable;
     let p = get_pool(&opts)?;
@@ -2004,6 +2145,41 @@ pub extern "C" fn mysql__engines(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn mysql__table_size(args: *const c_char) -> *const c_char {
     ffi_call(args, op_table_size)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__foreign_keys(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_foreign_keys)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__create_table(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_create_table)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__columns(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_columns)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__events(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_events)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__grants(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_grants)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__charsets(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_charsets)
+}
+
+#[no_mangle]
+pub extern "C" fn mysql__collations(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_collations)
 }
 
 #[no_mangle]

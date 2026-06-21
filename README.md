@@ -242,8 +242,15 @@ MySQL::table_exists $name, %opts → 1 | 0                  # $name must be a pl
 MySQL::views        %opts → @names                       # view names in current db
 MySQL::procedures   %opts → @{ {ROUTINE_NAME, ROUTINE_TYPE} }
 MySQL::indexes      $table, %opts → @rows                 # SHOW INDEX FROM $table
+MySQL::foreign_keys $table, %opts → @rows                 # FK constraints (key_column_usage + referential_constraints)
+MySQL::create_table $table, %opts → $ddl                  # SHOW CREATE TABLE — full CREATE TABLE DDL string
+MySQL::columns      $table, %opts → @rows                 # full information_schema.COLUMNS metadata
 MySQL::triggers     %opts → @rows                         # SHOW TRIGGERS
+MySQL::events       %opts → @rows                         # SHOW EVENTS — scheduled events
 MySQL::users        %opts → @{ {user, host} }            # from mysql.user (needs privilege)
+MySQL::grants       $user, %opts → @grants                # SHOW GRANTS FOR user@host; opt host (default "%")
+MySQL::charsets     %opts → @rows                         # SHOW CHARACTER SET
+MySQL::collations   %opts → @rows                         # SHOW COLLATION
 MySQL::explain      $sql, %opts → @plan_rows              # opt: params
 MySQL::db_size      %opts → $bytes                        # data + index length of current db
 MySQL::table_size   $table, %opts → { table, data_bytes, index_bytes, bytes }

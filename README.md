@@ -30,7 +30,6 @@ core binary so the daily-driver install stays slim.
 - [\[0x00\] Why this is a package, not a builtin](#0x00-why-this-is-a-package-not-a-builtin)
 - [\[0x01\] Install](#0x01-install)
 - [\[0x02\] Quick start](#0x02-quick-start)
-- [\[0x03\] CLI: `mysql`](#0x03-cli-mysql)
 - [\[0x04\] API reference](#0x04-api-reference)
 - [\[0x05\] FFI layer](#0x05-ffi-layer)
 - [\[0x06\] Type encoding](#0x06-type-encoding)
@@ -118,36 +117,6 @@ Connection URL sources (priority order):
 1. `url => "mysql://user:pass@host:port/db"` named arg
 2. Individual named args: `host`, `port`, `user`, `password`, `database`
 3. `$ENV{MYSQL_URL}`
-
-## [0x03] CLI: `mysql`
-
-```sh
-mysql query   "SELECT * FROM users WHERE id = ?" --bind='[42]'
-mysql execute "UPDATE users SET active = 1 WHERE id = ?" --bind='[42]'
-mysql exec   --file=migrate.sql
-mysql dump   --table=users --where='active = 1' --order-by=id --limit=100
-mysql tables
-mysql databases
-mysql schema --table=users
-mysql ping
-mysql build                                # `cargo build --release`
-mysql version
-```
-
-Connection flags (also accept env vars):
-
-```
---dsn URL          $MYSQL_DSN
---host H           $MYSQL_HOST
---port P           $MYSQL_PORT
---user U           $MYSQL_USER
---password PW      $MYSQL_PASSWORD
---database D       $MYSQL_DATABASE
---socket PATH      (Unix socket)
---ssl              enable TLS
---ssl-ca PATH      CA bundle (implies --ssl)
---connect-timeout SECONDS
-```
 
 ## [0x04] API reference
 

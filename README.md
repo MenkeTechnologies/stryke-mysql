@@ -43,7 +43,7 @@ core binary so the daily-driver install stays slim.
 ## [0x00] Why this is a package, not a builtin
 
 Same rationale as [stryke-arrow](../stryke-arrow): MySQL clients pull in a
-big native dependency (`mysql` + TLS stack + Tokio for async variants). Most
+big native dependency (the `mysql` driver and its protocol/TLS stack). Most
 stryke one-liners don't touch a database; for the ones that do, opt in with
 this package.
 
@@ -115,8 +115,8 @@ p MySQL::tables |> ep
 Connection URL sources (priority order):
 
 1. `url => "mysql://user:pass@host:port/db"` named arg
-2. Individual named args: `host`, `port`, `user`, `password`, `database`
-3. `$ENV{MYSQL_URL}`
+2. `$ENV{MYSQL_URL}`
+3. Individual named args: `host`, `port`, `user`, `password`, `database` (defaults `127.0.0.1`, `3306`, `root`)
 
 ## [0x04] API reference
 
@@ -372,7 +372,7 @@ make clean
 ```
 stryke-mysql/
   stryke.toml                  # stryke package manifest
-  Cargo.toml                   # Rust helper crate manifest
+  Cargo.toml                   # cdylib crate manifest
   Makefile                     # convenience targets
   src/lib.rs                   # single-file cdylib
   lib/
@@ -388,7 +388,7 @@ stryke-mysql/
     discover.stk
     explain.stk
   .github/workflows/
-    ci.yml                     # cargo check/test on PRs
+    ci.yml                     # check, fmt, clippy, test, .stk suite, docs gates
     release.yml                # cross-compile + GH release on tag push
 ```
 
